@@ -25,7 +25,7 @@
  *    any, must include the following acknowledgment:
  *    "This product includes software developed by David Ingram
  *    <apache@dmi.me.uk> for use in the mod_sqltemplate project
- *    (http://www.dmi.me.uk/code/mod_sqltemplate/)."
+ *    (http://www.dmi.me.uk/code/apache/mod_sqltemplate/)."
  *    Alternately, this acknowledgment may appear in the software
  *    itself, if and wherever such third-party acknowledgments
  *    normally appear.
