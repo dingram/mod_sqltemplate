@@ -99,8 +99,9 @@ typedef struct {
 #define trim(line) while (*(line)==' ' || *(line)=='\t') (line)++
 
 /* optional function - look it up once in post_config */
-static ap_dbd_t *(*mod_sqltemplate_acquire_fn)(request_rec*) = NULL;
-static void (*mod_sqltemplate_prepare_fn)(server_rec*, const char*, const char*) = NULL;
+static ap_dbd_t *(*sqltemplate_open_fn)(apr_pool_t*, server_rec*) = NULL;
+static void (*sqltemplate_prepare_fn)(server_rec*, const char*, const char*) = NULL;
+static void (*sqltemplate_close_fn)(server_rec*, ap_dbd_t*) = NULL;
 
 
 static apr_array_header_t * get_arguments(apr_pool_t * p, const char * line)
@@ -478,6 +479,15 @@ static const char *sqltemplate_rpt_section(cmd_parms * cmd,
 
   //macro_init(cmd->temp_pool); /* lazy... */
 
+  if (sqltemplate_prepare_fn == NULL) {
+    sqltemplate_prepare_fn = APR_RETRIEVE_OPTIONAL_FN(ap_dbd_prepare);
+    if (sqltemplate_prepare_fn == NULL) {
+      return "You must load mod_dbd to enable mod_sqltemplate";
+    }
+    sqltemplate_open_fn = APR_RETRIEVE_OPTIONAL_FN(ap_dbd_open);
+    sqltemplate_close_fn = APR_RETRIEVE_OPTIONAL_FN(ap_dbd_close);
+  }
+
   endp = ap_strchr_c(arg, '>');
   if (endp == NULL) {
     return apr_pstrcat(cmd->pool, cmd->cmd->name,
@@ -531,25 +541,29 @@ static const char *sqltemplate_rpt_section(cmd_parms * cmd,
 
   display_contents(contents);
 
+
+  ap_dbd_t *dbd = sqltemplate_open_fn(cmd->temp_pool, cmd->server);
+  if (!dbd) {
+    return "Failed to acquire database connection";
+  }
+
   apr_array_header_t *query_fields, *replacements, *newcontents;
   int i=0;
   query_fields = apr_array_make(cmd->temp_pool, 1, sizeof(char*));
   replacements = apr_array_make(cmd->temp_pool, 1, sizeof(char*));
-  {
-    char **new;
-    new = apr_array_push(query_fields); *new = apr_psprintf(cmd->temp_pool, "${apache_hosts.id}");
-    new = apr_array_push(replacements); *new = apr_psprintf(cmd->temp_pool, "1");
-    new = apr_array_push(query_fields); *new = apr_psprintf(cmd->temp_pool, "${apache_hosts.hostname}");
-    new = apr_array_push(replacements); *new = apr_psprintf(cmd->temp_pool, "test");
-    new = apr_array_push(query_fields); *new = apr_psprintf(cmd->temp_pool, "${apache_hosts.htroot}");
-    new = apr_array_push(replacements); *new = apr_psprintf(cmd->temp_pool, "example.net/htdocs");
-    new = apr_array_push(query_fields); *new = apr_psprintf(cmd->temp_pool, "${domain}");
-    new = apr_array_push(replacements); *new = apr_psprintf(cmd->temp_pool, "example.com");
-    new = apr_array_push(query_fields); *new = apr_psprintf(cmd->temp_pool, "${apache_host_aliases.hostname}");
-    new = apr_array_push(replacements); *new = apr_psprintf(cmd->temp_pool, "*.example.net");
-    new = apr_array_push(query_fields); *new = apr_psprintf(cmd->temp_pool, "\\$");
-    new = apr_array_push(replacements); *new = apr_psprintf(cmd->temp_pool, "$");
-  }
+
+  new = apr_array_push(query_fields); *new = apr_psprintf(cmd->temp_pool, "${apache_hosts.id}");
+  new = apr_array_push(replacements); *new = apr_psprintf(cmd->temp_pool, "1");
+  new = apr_array_push(query_fields); *new = apr_psprintf(cmd->temp_pool, "${apache_hosts.hostname}");
+  new = apr_array_push(replacements); *new = apr_psprintf(cmd->temp_pool, "test");
+  new = apr_array_push(query_fields); *new = apr_psprintf(cmd->temp_pool, "${apache_hosts.htroot}");
+  new = apr_array_push(replacements); *new = apr_psprintf(cmd->temp_pool, "example.net/htdocs");
+  new = apr_array_push(query_fields); *new = apr_psprintf(cmd->temp_pool, "${domain}");
+  new = apr_array_push(replacements); *new = apr_psprintf(cmd->temp_pool, "example.com");
+  new = apr_array_push(query_fields); *new = apr_psprintf(cmd->temp_pool, "${apache_host_aliases.hostname}");
+  new = apr_array_push(replacements); *new = apr_psprintf(cmd->temp_pool, "*.example.net");
+  new = apr_array_push(query_fields); *new = apr_psprintf(cmd->temp_pool, "\\$");
+  new = apr_array_push(replacements); *new = apr_psprintf(cmd->temp_pool, "$");
 
   // while (replacements = fetch_next_row) {
   errmsg = process_content(cmd->temp_pool, contents, query_fields, replacements,
@@ -569,6 +583,8 @@ static const char *sqltemplate_rpt_section(cmd_parms * cmd,
   cmd->config_file = make_array_config
       (cmd->temp_pool, newcontents, where, cmd->config_file, &cmd->config_file);
   // }
+
+  sqltemplate_close_fn(cmd->server, dbd);
 
   return NULL;
 }
