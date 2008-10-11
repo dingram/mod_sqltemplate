@@ -194,7 +194,7 @@ static void display_contents(apr_array_header_t * contents) {
   fprintf(stderr, "Contents: \n");
 
   for (i = 0; i < contents->nelts; i++) {
-    printf("  %s", ((char **)contents->elts)[i]);
+    fprintf(stderr, "  \033[1;37m%s\033[0m", ((char **)contents->elts)[i]);
   }
 }
 
@@ -306,6 +306,160 @@ static ap_configfile_t * make_array_config(apr_pool_t * p,
       array_getch, array_getstr, array_close);
 }
 
+#define debug(x) x
+
+/* replace name by replacement at the beginning of buf of bufsize.
+   returns an error message or NULL.
+*/
+static char * substitute(char * buf, int bufsize,
+                         const char * name,
+                         const char * replacement)
+{
+    int
+      lbuf  = strlen(buf),
+      lname = strlen(name),
+      lrepl = strlen(replacement),
+      lsubs = lrepl,
+      shift = lsubs - lname,
+      size  = lbuf + shift,
+      i, j;
+
+    /* buf must starts with name */
+    ap_assert(!strncmp(buf, name, lname));
+
+    /* ??? */
+    if (!strcmp(name,replacement)) return NULL;
+
+    debug(fprintf(stderr,
+                  "substitute(%s,%s,%s,sh=%d,lbuf=%d,lrepl=%d,lsubs=%d)\n",
+                  buf,name,replacement, shift, lbuf, lrepl, lsubs));
+
+    if (size >= bufsize) {
+        /* could/should I reallocate? */
+        return "cannot substitute, buffer size too small";
+    }
+
+    /* shift the end of line */
+    if (shift < 0) {
+        for (i = lname; i <= lbuf; i++)
+            buf[i + shift] = buf[i];
+    } else if (shift > 0) {
+        for (i = lbuf; i >= lname; i--)
+            buf[i + shift] = buf[i];
+    }
+
+    /* insert the replacement with escapes */
+    j = 0;
+    for (i = 0; i < lrepl; i++, j++)
+    {
+      buf[j] = replacement[i];
+    }
+
+    return NULL;
+}
+
+/* find first occurence of args in buf.
+   in case of conflict, the LONGEST argument is kept. (could be the FIRST?).
+   returns the pointer and the whichone found, or NULL.
+*/
+static char * next_substitution(const char * buf,
+                                const apr_array_header_t * args,
+                                int * whichone)
+{
+    int i;
+    char * chosen = NULL, * found, ** tab = (char **)args->elts;
+    size_t lchosen = 0, lfound;
+
+    for (i = 0; i < args->nelts; i++) {
+        found = ap_strstr(buf, tab[i]);
+        lfound = strlen(tab[i]);
+        if (found && ( i==0 || *(found-1) != '\\' )
+                  && (!chosen || found < chosen ||
+                      (found == chosen && lchosen < lfound))) {
+            chosen = found;
+            lchosen = lfound;
+            *whichone = i;
+        }
+    }
+
+    return chosen;
+}
+
+/* substitute arguments by replacements in buf of bufsize.
+   returns an error message or NULL.
+   if used is defined, returns the used macro arguments.
+*/
+static char * substitute_macro_args(char * buf, int bufsize,
+                                    const apr_array_header_t * arguments,
+                                    const apr_array_header_t * replacements,
+                                    apr_array_header_t * used)
+{
+    char * ptr = buf, * errmsg,
+        ** atab = (char **)arguments->elts,
+        ** rtab = (char **)replacements->elts;
+    int whichone = -1;
+
+    if (used) {
+        ap_assert(used->nalloc >= replacements->nelts);
+    }
+    debug(fprintf(stderr, "1# %s", buf));
+
+    while ((ptr = next_substitution(ptr, arguments, &whichone))) {
+        errmsg = substitute(ptr, buf - ptr + bufsize,
+                            atab[whichone], rtab[whichone]);
+        if (errmsg) {
+            return errmsg;
+        }
+        ptr += strlen(rtab[whichone]);
+        if (used) {
+            used->elts[whichone] = 1;
+        }
+    }
+    debug(fprintf(stderr, "2# %s", buf));
+
+    return NULL;
+}
+
+/* perform substitutions in a macro contents and
+   return the result as a newly allocated array, if result is defined.
+   may also return an error message.
+   passes used down to substitute_macro_args.
+*/
+static const char * process_content(apr_pool_t * p,
+                                    const apr_array_header_t * contents,
+                                    const apr_array_header_t * arguments,
+                                    const apr_array_header_t * replacements,
+                                    apr_array_header_t * used,
+                                    apr_array_header_t ** result)
+{
+    char ** new, * errmsg, line[MAX_STRING_LEN];
+    int i;
+
+    if (result) {
+        *result = apr_array_make(p, 1, sizeof(char *));
+    }
+
+    for (i = 0; i < contents->nelts; i++) {
+        strncpy(line, ((char **)contents->elts)[i], MAX_STRING_LEN - 1);
+        errmsg = substitute_macro_args(line, MAX_STRING_LEN,
+                                       arguments, replacements, used);
+        if (errmsg) {
+#if 0
+            return apr_psprintf(p, "while processing line %d of macro '%s'"
+                               " (%s)%s",
+                                i + 1, macro->name, macro->location, errmsg);
+#endif
+          return errmsg;
+        }
+
+        if (result) {
+            new = apr_array_push(*result);
+            *new = apr_pstrdup(p, line);
+        }
+    }
+    return NULL;
+}
+
 
 
 
@@ -319,8 +473,6 @@ static const char *sqltemplate_rpt_section(cmd_parms * cmd,
   const char * errmsg, * where, * location;
   char ** new, * name, * endp;
   //macro_t * macro, * old;
-
-  fprintf(stderr, "sql_repeat_section: arg='%s'\n", arg);
 
   //macro_init(cmd->temp_pool); /* lazy... */
 
@@ -344,58 +496,25 @@ static const char *sqltemplate_rpt_section(cmd_parms * cmd,
   }
 
 #if 0
-  old = get_macro_by_name(all_macros, name);
-  if (old) {
-#if !defined(MOD_MACRO_NO_WARNINGS)
-    /* already define: warn about the redefinition. */
-    ap_log_error(APLOG_MARK, APLOG_NOERRNO|APLOG_WARNING, 0, NULL,
-        "macro '%s' multiply defined. "
-        "%s, redefined on line %d of %s",
-        old->name, old->location,
-        cmd->config_file->line_number, cmd->config_file->name);
+  macro = (macro_t *)apr_palloc(cmd->temp_pool, sizeof(macro_t));
 #endif
-    macro = old;
-  }
-  else {
-    macro = (macro_t *)apr_palloc(cmd->temp_pool, sizeof(macro_t));
-  }
+  fprintf(stderr, "sql_repeat query: %s\n", name);
 
-  macro->name = name;
-#endif
-  fprintf(stderr, "sql_repeat_section: query: %s\n", name);
-
-  /* get arguments. */
+  /* get query arguments. */
   location = apr_psprintf(cmd->temp_pool,
       "line %d of %s",
       cmd->config_file->line_number,
       cmd->config_file->name);
-  fprintf(stderr, "sql_repeat_section: location=%s\n", location);
+  fprintf(stderr, "sql_repeat location: %s\n", location);
 
   where = apr_psprintf(cmd->temp_pool, "SQLRepeat \"%s\" (%s)",
       name, location);
 
-#if 0
-#if !defined(MOD_MACRO_NO_CHAR_PREFIX_WARNINGS) || \
-  !defined(MOD_MACRO_NO_WARNINGS)
-  if (looks_like_an_argument(name)) {
-    ap_log_error(APLOG_MARK, APLOG_NOERRNO|APLOG_WARNING, 0, NULL,
-        "%s better prefix a macro name with any of '%s'\n",
-        where, ARG_PREFIX);
-  }
-#endif
-#endif
+  apr_array_header_t * query_arguments = get_arguments(cmd->temp_pool, arg);
 
-  apr_array_header_t * arguments = get_arguments(cmd->temp_pool, arg);
-
-  //errmsg = check_macro_arguments(cmd->temp_pool, macro);
   errmsg=NULL;
 
-  if (errmsg) {
-    fprintf(stderr, "error: %s\n", errmsg);
-    return errmsg;
-  }
-
-  fprintf(stderr, "SQL_repeat prepared query args: %s\n", arg);
+  fprintf(stderr, "sql_repeat query args: %s\n", arg);
 
   apr_array_header_t * contents;
 
@@ -410,16 +529,44 @@ static const char *sqltemplate_rpt_section(cmd_parms * cmd,
 
   display_contents(contents);
 
-  //errmsg = check_macro_contents(cmd->temp_pool, macro);
-
-  if (errmsg) {
-    return apr_psprintf(cmd->temp_pool,
-        "%s\n\tcontents checking error: %s", where, errmsg);
+  apr_array_header_t *query_fields, *replacements, *newcontents;
+  int i=0;
+  query_fields = apr_array_make(cmd->temp_pool, 1, sizeof(char*));
+  replacements = apr_array_make(cmd->temp_pool, 1, sizeof(char*));
+  {
+    char **new;
+    new = apr_array_push(query_fields); *new = apr_psprintf(cmd->temp_pool, "${apache_hosts.id}");
+    new = apr_array_push(replacements); *new = apr_psprintf(cmd->temp_pool, "1");
+    new = apr_array_push(query_fields); *new = apr_psprintf(cmd->temp_pool, "${apache_hosts.hostname}");
+    new = apr_array_push(replacements); *new = apr_psprintf(cmd->temp_pool, "test");
+    new = apr_array_push(query_fields); *new = apr_psprintf(cmd->temp_pool, "${apache_hosts.htroot}");
+    new = apr_array_push(replacements); *new = apr_psprintf(cmd->temp_pool, "example.net/htdocs");
+    new = apr_array_push(query_fields); *new = apr_psprintf(cmd->temp_pool, "${domain}");
+    new = apr_array_push(replacements); *new = apr_psprintf(cmd->temp_pool, "example.com");
+    new = apr_array_push(query_fields); *new = apr_psprintf(cmd->temp_pool, "${apache_host_aliases.hostname}");
+    new = apr_array_push(replacements); *new = apr_psprintf(cmd->temp_pool, "*.example.net");
+    new = apr_array_push(query_fields); *new = apr_psprintf(cmd->temp_pool, "\\$");
+    new = apr_array_push(replacements); *new = apr_psprintf(cmd->temp_pool, "$");
   }
 
-  /* add the new macro. */
-  //new  = apr_array_push(all_macros);
-  //*new = (char *)macro;
+  // while (replacements = fetch_next_row) {
+  errmsg = process_content(cmd->temp_pool, contents, query_fields, replacements,
+                           NULL, &newcontents);
+
+  if (errmsg) {
+      return apr_psprintf(cmd->temp_pool,
+                         "%s error while substituting:\n%s",
+                         where, errmsg);
+  }
+
+  /* fix??? why is it wrong? should I -- the new one? */
+  cmd->config_file->line_number++;
+
+  display_contents(newcontents);
+
+  cmd->config_file = make_array_config
+      (cmd->temp_pool, newcontents, where, cmd->config_file, &cmd->config_file);
+  // }
 
   return NULL;
 }
