@@ -330,9 +330,11 @@ static char * substitute(char * buf, int bufsize,
     /* ??? */
     if (!strcmp(name,replacement)) return NULL;
 
+#if 0
     debug(fprintf(stderr,
                   "substitute(%s,%s,%s,sh=%d,lbuf=%d,lrepl=%d,lsubs=%d)\n",
                   buf,name,replacement, shift, lbuf, lrepl, lsubs));
+#endif
 
     if (size >= bufsize) {
         /* could/should I reallocate? */
@@ -402,7 +404,7 @@ static char * substitute_macro_args(char * buf, int bufsize,
     if (used) {
         ap_assert(used->nalloc >= replacements->nelts);
     }
-    debug(fprintf(stderr, "1# %s", buf));
+    //debug(fprintf(stderr, "1# %s", buf));
 
     while ((ptr = next_substitution(ptr, arguments, &whichone))) {
         errmsg = substitute(ptr, buf - ptr + bufsize,
@@ -415,7 +417,7 @@ static char * substitute_macro_args(char * buf, int bufsize,
             used->elts[whichone] = 1;
         }
     }
-    debug(fprintf(stderr, "2# %s", buf));
+    //debug(fprintf(stderr, "2# %s", buf));
 
     return NULL;
 }
