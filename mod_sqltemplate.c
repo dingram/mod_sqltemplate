@@ -479,19 +479,36 @@ static const char * process_content(apr_pool_t * p,
 
 static const char *sqltemplate_db_connect(apr_pool_t *pool, server_rec *s) {
   sqltpl_dbinfo_t *dbinfo = get_dbinfo(pool, s);
+  if (!dbinfo->driver || !dbinfo->params || !*(dbinfo->params) || !dbinfo->driver_name || !*(dbinfo->driver_name)) {
+    return "Database connection not set up - please use SQLTemplateDBDriver and SQLTemplateDBParams";
+  }
 
+  const char *err;
   fprintf(stderr, "Attempting connect with:\n  driver %s\n  params %s\n", dbinfo->driver_name, dbinfo->params);
-  apr_status_t rv = apr_dbd_open(dbinfo->driver, pool, dbinfo->params, &dbinfo->handle);
-  fprintf(stderr, "Result: %d\n", rv);
+  apr_status_t rv = apr_dbd_open_ex(dbinfo->driver, pool, dbinfo->params, &dbinfo->handle, &err);
   if (rv != APR_SUCCESS) {
-      switch (rv) {
+    switch (rv) {
       case APR_EGENERAL:
+          ap_log_error(APLOG_MARK, APLOG_ERR, 0, s, "mod_sqltemplate: Can't connect to %s: %s", dbinfo->driver_name, err);
           return apr_psprintf(pool, "DBD: Can't connect to %s", dbinfo->driver_name);
           break;
       default:
           return apr_psprintf(pool, "DBD: mod_dbd not compatible with APR in open");
           break;
-      }
+    }
+  }
+  return NULL;
+}
+
+static const char * sqltemplate_db_disconnect(apr_pool_t *pool, server_rec *s) {
+  sqltpl_dbinfo_t *dbinfo = get_dbinfo(pool, s);
+  if (!dbinfo->driver || !dbinfo->params || !*(dbinfo->params) || !dbinfo->driver_name || !*(dbinfo->driver_name)) {
+    return "Database connection not set up - please use SQLTemplateDBDriver and SQLTemplateDBParams";
+  }
+  apr_status_t rv = apr_dbd_close(dbinfo->driver, dbinfo->handle);
+
+  if (rv != APR_SUCCESS) {
+    return apr_psprintf(pool, "DBD: Can't disconnect from %s", dbinfo->driver_name);
   }
   return NULL;
 }
@@ -569,12 +586,14 @@ static const char *sqltemplate_rpt_section(cmd_parms * cmd,
   display_contents(contents);
 
 
-  // TODO: acquire DB connection
+  // acquire DB connection
   errmsg = sqltemplate_db_connect(cmd->temp_pool, cmd->server);
 
   if (errmsg) {
     return apr_psprintf(cmd->temp_pool, "%s: Database error: %s", where, errmsg);
   }
+
+
 
   apr_array_header_t *query_fields, *replacements, *newcontents;
   query_fields = apr_array_make(cmd->temp_pool, 1, sizeof(char*));
@@ -594,25 +613,27 @@ static const char *sqltemplate_rpt_section(cmd_parms * cmd,
   new = apr_array_push(replacements); *new = apr_psprintf(cmd->temp_pool, "$");
 
   // while (replacements = fetch_next_row) {
-  errmsg = process_content(cmd->temp_pool, contents, query_fields, replacements,
-                           NULL, &newcontents);
+    errmsg = process_content(cmd->temp_pool, contents, query_fields, replacements,
+                             NULL, &newcontents);
 
-  if (errmsg) {
+    if (errmsg) {
       return apr_psprintf(cmd->temp_pool,
                          "%s error while substituting:\n%s",
                          where, errmsg);
-  }
+    }
 
-  /* fix??? why is it wrong? should I -- the new one? */
-  cmd->config_file->line_number++;
+    /* fix??? why is it wrong? should I -- the new one? */
+    cmd->config_file->line_number++;
 
-  display_contents(newcontents);
+    display_contents(newcontents);
 
-  cmd->config_file = make_array_config
-      (cmd->temp_pool, newcontents, where, cmd->config_file, &cmd->config_file);
+    cmd->config_file = make_array_config
+        (cmd->temp_pool, newcontents, where, cmd->config_file, &cmd->config_file);
+
+    apr_array_clear(replacements);
   // }
 
-  // TODO: close DB connection
+  sqltemplate_db_disconnect(cmd->temp_pool, cmd->server);
 
   return NULL;
 }
