@@ -477,10 +477,29 @@ static const char * process_content(apr_pool_t * p,
 }
 
 
+static const char *sqltemplate_db_connect(apr_pool_t *pool, server_rec *s) {
+  sqltpl_dbinfo_t *dbinfo = get_dbinfo(pool, s);
+
+  fprintf(stderr, "Attempting connect with:\n  driver %s\n  params %s\n", dbinfo->driver_name, dbinfo->params);
+  apr_status_t rv = apr_dbd_open(dbinfo->driver, pool, dbinfo->params, &dbinfo->handle);
+  fprintf(stderr, "Result: %d\n", rv);
+  if (rv != APR_SUCCESS) {
+      switch (rv) {
+      case APR_EGENERAL:
+          return apr_psprintf(pool, "DBD: Can't connect to %s", dbinfo->driver_name);
+          break;
+      default:
+          return apr_psprintf(pool, "DBD: mod_dbd not compatible with APR in open");
+          break;
+      }
+  }
+  return NULL;
+}
 
 
 
-/* handles: <SQLRepeat "SQL statement"> any trash...
+
+/* handles: <SQLRepeat "SQL statement">
 */
 static const char *sqltemplate_rpt_section(cmd_parms * cmd,
     void * dummy,
@@ -551,6 +570,11 @@ static const char *sqltemplate_rpt_section(cmd_parms * cmd,
 
 
   // TODO: acquire DB connection
+  errmsg = sqltemplate_db_connect(cmd->temp_pool, cmd->server);
+
+  if (errmsg) {
+    return apr_psprintf(cmd->temp_pool, "%s: Database error: %s", where, errmsg);
+  }
 
   apr_array_header_t *query_fields, *replacements, *newcontents;
   query_fields = apr_array_make(cmd->temp_pool, 1, sizeof(char*));
@@ -590,24 +614,6 @@ static const char *sqltemplate_rpt_section(cmd_parms * cmd,
 
   // TODO: close DB connection
 
-  return NULL;
-}
-
-
-static const char *sqltemplate_db_connect(apr_pool_t *pool, server_rec *s) {
-  sqltpl_dbinfo_t *dbinfo = get_dbinfo(pool, s);
-
-  apr_status_t rv = apr_dbd_open(dbinfo->driver, pool, dbinfo->params, &dbinfo->handle);
-  if (rv != APR_SUCCESS) {
-      switch (rv) {
-      case APR_EGENERAL:
-          return apr_psprintf(pool, "DBD: Can't connect to %s", dbinfo->driver_name);
-          break;
-      default:
-          return apr_psprintf(pool, "DBD: mod_dbd not compatible with APR in open");
-          break;
-      }
-  }
   return NULL;
 }
 
