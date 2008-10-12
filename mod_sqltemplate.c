@@ -73,6 +73,8 @@
 #include "apr_portable.h"
 #include "apr_file_io.h"
 
+#define debug(x)
+
 extern module AP_MODULE_DECLARE_DATA sqltemplate_module;
 
 
@@ -202,6 +204,16 @@ static char * get_lines_till_end_token(apr_pool_t * p,
 }
 
 
+static void display_array(apr_array_header_t * array) {
+  int i;
+
+  fprintf(stderr, "Array: \n");
+
+  for (i = 0; i < array->nelts; i++) {
+    fprintf(stderr, "  [%03d] = \"\033[1;37m%s\033[0m\"\n", i, ((char **)array->elts)[i]);
+  }
+}
+
 static void display_contents(apr_array_header_t * contents) {
   int i;
 
@@ -320,8 +332,6 @@ static ap_configfile_t * make_array_config(apr_pool_t * p,
       array_getch, array_getstr, array_close);
 }
 
-#define debug(x) x
-
 /* replace name by replacement at the beginning of buf of bufsize.
    returns an error message or NULL.
 */
@@ -330,13 +340,15 @@ static char * substitute(char * buf, int bufsize,
                          const char * replacement)
 {
     int
-      lbuf  = strlen(buf),
-      lname = strlen(name),
-      lrepl = strlen(replacement),
+      lbuf  = buf         ? strlen(buf        ) : 0,
+      lname = name        ? strlen(name       ) : 0,
+      lrepl = replacement ? strlen(replacement) : 0,
       lsubs = lrepl,
       shift = lsubs - lname,
       size  = lbuf + shift,
       i, j;
+
+    if (!lbuf || !lname || !lrepl) return NULL;
 
     /* buf must starts with name */
     ap_assert(!strncmp(buf, name, lname));
@@ -344,11 +356,9 @@ static char * substitute(char * buf, int bufsize,
     /* ??? */
     if (!strcmp(name,replacement)) return NULL;
 
-#if 0
     debug(fprintf(stderr,
                   "substitute(%s,%s,%s,sh=%d,lbuf=%d,lrepl=%d,lsubs=%d)\n",
                   buf,name,replacement, shift, lbuf, lrepl, lsubs));
-#endif
 
     if (size >= bufsize) {
         /* could/should I reallocate? */
@@ -418,20 +428,30 @@ static char * substitute_macro_args(char * buf, int bufsize,
     if (used) {
         ap_assert(used->nalloc >= replacements->nelts);
     }
-    //debug(fprintf(stderr, "1# %s", buf));
+    debug(fprintf(stderr, "1# %s", buf));
 
     while ((ptr = next_substitution(ptr, arguments, &whichone))) {
+      debug(fprintf(stderr, "errmsg = substitute("));
+      debug(fprintf(stderr, "ptr:\"%s\", ", ptr));
+      debug(fprintf(stderr, "buf:%p - ptr:%p + bufsize:%d = %d, ", buf, ptr, bufsize, buf - ptr + bufsize));
+      debug(fprintf(stderr, "atab[whichone:%d]:\"%s\", ", whichone, atab[whichone]));
+      debug(fprintf(stderr, "rtab[whichone:%d]:\"%s\"", whichone, rtab[whichone]));
+      debug(fprintf(stderr, ");\n"));
+
         errmsg = substitute(ptr, buf - ptr + bufsize,
                             atab[whichone], rtab[whichone]);
         if (errmsg) {
             return errmsg;
         }
         ptr += strlen(rtab[whichone]);
+        if (!*rtab[whichone]) {
+          ptr++;
+        }
         if (used) {
             used->elts[whichone] = 1;
         }
     }
-    //debug(fprintf(stderr, "2# %s", buf));
+    debug(fprintf(stderr, "2# %s", buf));
 
     return NULL;
 }
@@ -452,30 +472,43 @@ static const char * process_content(apr_pool_t * p,
     int i;
 
     if (result) {
-        *result = apr_array_make(p, 1, sizeof(char *));
+      *result = apr_array_make(p, 1, sizeof(char *));
     }
 
     for (i = 0; i < contents->nelts; i++) {
-        strncpy(line, ((char **)contents->elts)[i], MAX_STRING_LEN - 1);
-        errmsg = substitute_macro_args(line, MAX_STRING_LEN,
+      debug(fprintf(stderr, "Line %d of %d\n", i+1, contents->nelts));
+      strncpy(line, ((char **)contents->elts)[i], MAX_STRING_LEN - 1);
+      errmsg = substitute_macro_args(line, MAX_STRING_LEN,
                                        arguments, replacements, used);
-        if (errmsg) {
+      debug(fprintf(stderr, "Line %d of %d done\n", i+1, contents->nelts));
+      if (errmsg) {
 #if 0
-            return apr_psprintf(p, "while processing line %d of macro '%s'"
-                               " (%s)%s",
-                                i + 1, macro->name, macro->location, errmsg);
+        return apr_psprintf(p, "while processing line %d of macro '%s'"
+                           " (%s)%s",
+                            i + 1, macro->name, macro->location, errmsg);
 #endif
-          return errmsg;
-        }
+        return errmsg;
+      }
 
-        if (result) {
-            new = apr_array_push(*result);
-            *new = apr_pstrdup(p, line);
-        }
+      if (result) {
+        new = apr_array_push(*result);
+        *new = apr_pstrdup(p, line);
+      }
     }
     return NULL;
 }
 
+
+// automatic cleanup function, called on pool destruction
+static apr_status_t sqltpl_db_close(void *data) {
+  sqltpl_dbinfo_t *dbinfo = data;
+  if (!dbinfo || !dbinfo->driver || !dbinfo->handle) {
+    // already freed?
+    return APR_SUCCESS;
+  } else {
+    return apr_dbd_close(dbinfo->driver, dbinfo->handle);
+  }
+}
 
 static const char *sqltemplate_db_connect(apr_pool_t *pool, server_rec *s) {
   sqltpl_dbinfo_t *dbinfo = get_dbinfo(pool, s);
@@ -483,9 +516,17 @@ static const char *sqltemplate_db_connect(apr_pool_t *pool, server_rec *s) {
     return "Database connection not set up - please use SQLTemplateDBDriver and SQLTemplateDBParams";
   }
 
+  debug(fprintf(stderr, "Driver: %p\n", dbinfo->driver));
+  debug(fprintf(stderr, "Handle: %p\n", dbinfo->handle));
+
+  if (dbinfo->handle) {
+    return NULL;
+  }
+
   const char *err;
-  fprintf(stderr, "Attempting connect with:\n  driver %s\n  params %s\n", dbinfo->driver_name, dbinfo->params);
+  debug(fprintf(stderr, "Attempting connect with:\n  driver %s\n  params %s\n", dbinfo->driver_name, dbinfo->params));
   apr_status_t rv = apr_dbd_open_ex(dbinfo->driver, pool, dbinfo->params, &dbinfo->handle, &err);
+  debug(fprintf(stderr, "Done\n"));
   if (rv != APR_SUCCESS) {
     switch (rv) {
       case APR_EGENERAL:
@@ -497,19 +538,9 @@ static const char *sqltemplate_db_connect(apr_pool_t *pool, server_rec *s) {
           break;
     }
   }
-  return NULL;
-}
 
-static const char * sqltemplate_db_disconnect(apr_pool_t *pool, server_rec *s) {
-  sqltpl_dbinfo_t *dbinfo = get_dbinfo(pool, s);
-  if (!dbinfo->driver || !dbinfo->params || !*(dbinfo->params) || !dbinfo->driver_name || !*(dbinfo->driver_name)) {
-    return "Database connection not set up - please use SQLTemplateDBDriver and SQLTemplateDBParams";
-  }
-  apr_status_t rv = apr_dbd_close(dbinfo->driver, dbinfo->handle);
-
-  if (rv != APR_SUCCESS) {
-    return apr_psprintf(pool, "DBD: Can't disconnect from %s", dbinfo->driver_name);
-  }
+  // automatic cleanup
+  apr_pool_cleanup_register(pool, dbinfo, sqltpl_db_close, apr_pool_cleanup_null);
   return NULL;
 }
 
@@ -523,7 +554,7 @@ static const char *sqltemplate_rpt_section(cmd_parms * cmd,
     const char * arg)
 {
   const char * errmsg, * where, * location;
-  char ** new, * name, * endp;
+  char ** new, * query, * endp;
   //macro_t * macro, * old;
 
   //macro_init(cmd->temp_pool); /* lazy... */
@@ -541,16 +572,16 @@ static const char *sqltemplate_rpt_section(cmd_parms * cmd,
   }
 
   /* get name. */
-  name = ap_getword_conf(cmd->temp_pool, &arg);
+  query = ap_getword_conf(cmd->temp_pool, &arg);
 
-  if (empty_string_p(name)) {
+  if (empty_string_p(query)) {
     return "SQL repeat definition: query not specified";
   }
 
 #if 0
   macro = (macro_t *)apr_palloc(cmd->temp_pool, sizeof(macro_t));
 #endif
-  fprintf(stderr, "sql_repeat query: %s\n", name);
+  debug(fprintf(stderr, "sql_repeat query: %s\n", query));
 
   /* get query arguments. */
   location = apr_psprintf(cmd->temp_pool,
@@ -559,8 +590,8 @@ static const char *sqltemplate_rpt_section(cmd_parms * cmd,
       cmd->config_file->name);
   //fprintf(stderr, "sql_repeat location: %s\n", location);
 
-  where = apr_psprintf(cmd->temp_pool, "SQLRepeat \"%s\" (%s)",
-      name, location);
+  //where = apr_psprintf(cmd->temp_pool, "SQLRepeat \"%s\" (%s)", name, location);
+  where = apr_psprintf(cmd->temp_pool, "SQLRepeat at %s", location);
 
   apr_array_header_t * query_arguments = get_arguments(cmd->temp_pool, arg);
 
@@ -569,7 +600,7 @@ static const char *sqltemplate_rpt_section(cmd_parms * cmd,
   int i=0;
 
   for (i=0; i < query_arguments->nelts; i++) {
-    fprintf(stderr, "sql_repeat query arg: %s\n", ((char **)query_arguments->elts)[i]);
+    debug(fprintf(stderr, "sql_repeat query arg: %s\n", ((char **)query_arguments->elts)[i]));
   }
 
   apr_array_header_t * contents;
@@ -583,7 +614,7 @@ static const char *sqltemplate_rpt_section(cmd_parms * cmd,
         "%s\n\tcontents error: %s", where, errmsg);
   }
 
-  display_contents(contents);
+  debug(display_contents(contents));
 
 
   // acquire DB connection
@@ -593,26 +624,95 @@ static const char *sqltemplate_rpt_section(cmd_parms * cmd,
     return apr_psprintf(cmd->temp_pool, "%s: Database error: %s", where, errmsg);
   }
 
+  sqltpl_dbinfo_t *dbinfo = get_dbinfo(cmd->temp_pool, cmd->server);
+  debug(fprintf(stderr, "DBINFO: %p %p\n", dbinfo->driver, dbinfo->handle));
+  apr_status_t rv;
+  apr_dbd_prepared_t *stmt;
+
+  // prepare the query
+
+  debug(fprintf(stderr, "Preparing sub-pool...\n  %s\n", query));
+  // set up a sub-pool
+  apr_pool_t *prepared_pool;
+  rv = apr_pool_create(&prepared_pool, cmd->temp_pool);
+  if (rv != APR_SUCCESS) {
+    ap_log_error(APLOG_MARK, APLOG_CRIT, rv, cmd->server, "SQLTemplate: Failed to create memory pool");
+    return "Memory error";
+  }
+
+#if 0
+  fprintf(stderr, "DBINFO: %p %p\n", dbinfo->driver, dbinfo->handle);
+  fprintf(stderr, "Preparing query...\n  %s\n", query);
+  rv = apr_dbd_prepare(dbinfo->driver, prepared_pool, dbinfo->handle, query, NULL, &stmt);
+  if (rv) {
+    /*
+    fprintf(stderr, "DBINFO: %p %p %d\n", dbinfo->driver, dbinfo->handle, rv);
+    const char *dberrmsg = apr_dbd_error(dbinfo->driver, dbinfo->handle, rv);
+    ap_log_error(APLOG_MARK, APLOG_ERR, rv, cmd->server,
+                 "DBD: failed to prepare SQL statements: %s",
+                 (dberrmsg ? dberrmsg : "[???]"));
+                 */
+    apr_pool_destroy(prepared_pool);
+    return "Failed to prepare SQL statement";
+  }
+#endif
 
 
   apr_array_header_t *query_fields, *replacements, *newcontents;
   query_fields = apr_array_make(cmd->temp_pool, 1, sizeof(char*));
   replacements = apr_array_make(cmd->temp_pool, 1, sizeof(char*));
 
-  new = apr_array_push(query_fields); *new = apr_psprintf(cmd->temp_pool, "${apache_hosts.id}");
-  new = apr_array_push(replacements); *new = apr_psprintf(cmd->temp_pool, "1");
-  new = apr_array_push(query_fields); *new = apr_psprintf(cmd->temp_pool, "${apache_hosts.hostname}");
-  new = apr_array_push(replacements); *new = apr_psprintf(cmd->temp_pool, "test");
-  new = apr_array_push(query_fields); *new = apr_psprintf(cmd->temp_pool, "${apache_hosts.htroot}");
-  new = apr_array_push(replacements); *new = apr_psprintf(cmd->temp_pool, "example.net/htdocs");
-  new = apr_array_push(query_fields); *new = apr_psprintf(cmd->temp_pool, "${domain}");
-  new = apr_array_push(replacements); *new = apr_psprintf(cmd->temp_pool, "example.com");
-  new = apr_array_push(query_fields); *new = apr_psprintf(cmd->temp_pool, "${apache_host_aliases.hostname}");
-  new = apr_array_push(replacements); *new = apr_psprintf(cmd->temp_pool, "*.example.net");
-  new = apr_array_push(query_fields); *new = apr_psprintf(cmd->temp_pool, "\\$");
-  new = apr_array_push(replacements); *new = apr_psprintf(cmd->temp_pool, "$");
+  apr_dbd_results_t *res = NULL;
+  apr_dbd_row_t *row = NULL;
+
+  if (apr_dbd_select(dbinfo->driver, prepared_pool, dbinfo->handle, &res, query, 0) != 0) {
+    ap_log_error(APLOG_MARK, APLOG_ERR, 0, cmd->server, "Failed to execute query: %s", query);
+    apr_pool_destroy(prepared_pool);
+    return "Failed to execute query";
+  }
+
+  i = 0;
+  const char *name;
+  for (name = apr_dbd_get_name(dbinfo->driver, res, i);
+       name != NULL;
+       name = apr_dbd_get_name(dbinfo->driver, res, ++i)) {
+    new = apr_array_push(query_fields); *new = apr_psprintf(cmd->temp_pool, "${%s}", name);
+  }
+  new = apr_array_push(query_fields); *new = "\\$";
+  debug(display_array(query_fields));
 
   // while (replacements = fetch_next_row) {
+  for (rv = apr_dbd_get_row(dbinfo->driver, cmd->temp_pool, res, &row, -1);
+       rv != -1;
+       rv = apr_dbd_get_row(dbinfo->driver, cmd->temp_pool, res, &row, -1)) {
+
+    if (rv != 0) {
+      ap_log_error(APLOG_MARK, APLOG_ERR, rv, cmd->server, "Error retrieving results from database");
+      apr_pool_destroy(prepared_pool);
+      return "Error retrieving results";
+    }
+
+    debug(fprintf(stderr, "Clearing replacements\n"));
+    apr_array_clear(replacements);
+
+    debug(fprintf(stderr, "Fetching entries\n"));
+    const char *ent;
+    for (i=0; i < query_fields->nelts - 1; i++) {
+      ent = apr_dbd_get_entry(dbinfo->driver, row, i);
+      if (ent) {
+        new = apr_array_push(replacements); *new = (char *)ent;
+      }
+    }
+
+    // add special replacement: \$ --> $
+    new = apr_array_push(replacements); *new = apr_psprintf(cmd->temp_pool, "$");
+    debug(display_array(replacements));
+
+    debug(fprintf(stderr, "Before "));
+    debug(display_contents(contents));
+
+    debug(fprintf(stderr, "processing...\n"));
+
     errmsg = process_content(cmd->temp_pool, contents, query_fields, replacements,
                              NULL, &newcontents);
 
@@ -625,15 +725,12 @@ static const char *sqltemplate_rpt_section(cmd_parms * cmd,
     /* fix??? why is it wrong? should I -- the new one? */
     cmd->config_file->line_number++;
 
+    debug(fprintf(stderr, "After "));
     display_contents(newcontents);
 
     cmd->config_file = make_array_config
         (cmd->temp_pool, newcontents, where, cmd->config_file, &cmd->config_file);
-
-    apr_array_clear(replacements);
-  // }
-
-  sqltemplate_db_disconnect(cmd->temp_pool, cmd->server);
+  }
 
   return NULL;
 }
@@ -642,16 +739,16 @@ static const char *sqltemplate_rpt_section(cmd_parms * cmd,
 static const char *sqltemplate_db_param(cmd_parms *cmd, void *dconf, const char *val)
 {
   const apr_dbd_driver_t *driver = NULL;
-  sqltpl_dbinfo_t *dbinfo = get_dbinfo(cmd->pool, cmd->server);
+  sqltpl_dbinfo_t *dbinfo = get_dbinfo(cmd->temp_pool, cmd->server);
 
   switch ((long) cmd->info) {
     case 0:
       dbinfo->driver_name = val;
-      switch (apr_dbd_get_driver(cmd->pool, dbinfo->driver_name, &dbinfo->driver)) {
+      switch (apr_dbd_get_driver(cmd->temp_pool, dbinfo->driver_name, &dbinfo->driver)) {
       case APR_ENOTIMPL:
-          return apr_psprintf(cmd->pool, "DBD: No driver for %s", dbinfo->driver_name);
+          return apr_psprintf(cmd->temp_pool, "DBD: No driver for %s", dbinfo->driver_name);
       case APR_EDSOOPEN:
-          return apr_psprintf(cmd->pool,
+          return apr_psprintf(cmd->temp_pool,
 #ifdef NETWARE
                               "DBD: Can't load driver file dbd%s.nlm",
 #else
@@ -659,7 +756,7 @@ static const char *sqltemplate_db_param(cmd_parms *cmd, void *dconf, const char 
 #endif
                               dbinfo->driver_name);
       case APR_ESYMNOTFOUND:
-          return apr_psprintf(cmd->pool,
+          return apr_psprintf(cmd->temp_pool,
                               "DBD: Failed to load driver apr_dbd_%s_driver",
                               dbinfo->driver_name);
       }
