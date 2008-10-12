@@ -73,17 +73,18 @@
 #include "apr_portable.h"
 #include "apr_file_io.h"
 
-#include "mod_dbd.h"
+extern module AP_MODULE_DECLARE_DATA sqltemplate_module;
 
 
-/* a repeat section: name, arguments, contents, location.
+/* information about DB handles
 */
 typedef struct {
-  char * query;        /* The SQL query to execute */
-  apr_array_header_t * arguments; /* of char* */
-  apr_array_header_t * contents;
-  char * location;            /* of the definition. */
-} sqlrpt_t;
+  const char *driver_name;
+  const char *params;
+  const apr_dbd_driver_t *driver;
+  apr_dbd_t *handle;
+  apr_pool_t *pool;
+} sqltpl_dbinfo_t;
 
 #define BEGIN_SQLRPT "<SQLRepeat"
 #define END_SQLRPT   "</SQLRepeat>"
@@ -98,10 +99,22 @@ typedef struct {
 #define empty_string_p(p) (!(p) || !*(p))
 #define trim(line) while (*(line)==' ' || *(line)=='\t') (line)++
 
-/* optional function - look it up once in post_config */
-static ap_dbd_t *(*sqltemplate_open_fn)(apr_pool_t*, server_rec*) = NULL;
-static void (*sqltemplate_prepare_fn)(server_rec*, const char*, const char*) = NULL;
-static void (*sqltemplate_close_fn)(server_rec*, ap_dbd_t*) = NULL;
+
+static void *get_dbinfo(apr_pool_t *pool, server_rec *s) {
+  sqltpl_dbinfo_t *dbinfo = ap_get_module_config(s->module_config, &sqltemplate_module);
+
+  if (!dbinfo) {
+    dbinfo=apr_pcalloc(pool, sizeof(sqltpl_dbinfo_t));
+    // any other initialisation
+    dbinfo->driver_name = "";
+    dbinfo->params = "";
+
+    ap_set_module_config(s->module_config, &sqltemplate_module, dbinfo);
+  }
+
+  return dbinfo;
+}
+
 
 
 static apr_array_header_t * get_arguments(apr_pool_t * p, const char * line)
@@ -479,15 +492,6 @@ static const char *sqltemplate_rpt_section(cmd_parms * cmd,
 
   //macro_init(cmd->temp_pool); /* lazy... */
 
-  if (sqltemplate_prepare_fn == NULL) {
-    sqltemplate_prepare_fn = APR_RETRIEVE_OPTIONAL_FN(ap_dbd_prepare);
-    if (sqltemplate_prepare_fn == NULL) {
-      return "You must load mod_dbd to enable mod_sqltemplate";
-    }
-    sqltemplate_open_fn = APR_RETRIEVE_OPTIONAL_FN(ap_dbd_open);
-    sqltemplate_close_fn = APR_RETRIEVE_OPTIONAL_FN(ap_dbd_close);
-  }
-
   endp = ap_strchr_c(arg, '>');
   if (endp == NULL) {
     return apr_pstrcat(cmd->pool, cmd->cmd->name,
@@ -517,7 +521,7 @@ static const char *sqltemplate_rpt_section(cmd_parms * cmd,
       "line %d of %s",
       cmd->config_file->line_number,
       cmd->config_file->name);
-  fprintf(stderr, "sql_repeat location: %s\n", location);
+  //fprintf(stderr, "sql_repeat location: %s\n", location);
 
   where = apr_psprintf(cmd->temp_pool, "SQLRepeat \"%s\" (%s)",
       name, location);
@@ -526,7 +530,11 @@ static const char *sqltemplate_rpt_section(cmd_parms * cmd,
 
   errmsg=NULL;
 
-  fprintf(stderr, "sql_repeat query args: %s\n", arg);
+  int i=0;
+
+  for (i=0; i < query_arguments->nelts; i++) {
+    fprintf(stderr, "sql_repeat query arg: %s\n", ((char **)query_arguments->elts)[i]);
+  }
 
   apr_array_header_t * contents;
 
@@ -542,13 +550,9 @@ static const char *sqltemplate_rpt_section(cmd_parms * cmd,
   display_contents(contents);
 
 
-  ap_dbd_t *dbd = sqltemplate_open_fn(cmd->temp_pool, cmd->server);
-  if (!dbd) {
-    return "Failed to acquire database connection";
-  }
+  // TODO: acquire DB connection
 
   apr_array_header_t *query_fields, *replacements, *newcontents;
-  int i=0;
   query_fields = apr_array_make(cmd->temp_pool, 1, sizeof(char*));
   replacements = apr_array_make(cmd->temp_pool, 1, sizeof(char*));
 
@@ -584,43 +588,78 @@ static const char *sqltemplate_rpt_section(cmd_parms * cmd,
       (cmd->temp_pool, newcontents, where, cmd->config_file, &cmd->config_file);
   // }
 
-  sqltemplate_close_fn(cmd->server, dbd);
+  // TODO: close DB connection
 
   return NULL;
 }
+
+
+static const char *sqltemplate_db_connect(apr_pool_t *pool, server_rec *s) {
+  sqltpl_dbinfo_t *dbinfo = get_dbinfo(pool, s);
+
+  apr_status_t rv = apr_dbd_open(dbinfo->driver, pool, dbinfo->params, &dbinfo->handle);
+  if (rv != APR_SUCCESS) {
+      switch (rv) {
+      case APR_EGENERAL:
+          return apr_psprintf(pool, "DBD: Can't connect to %s", dbinfo->driver_name);
+          break;
+      default:
+          return apr_psprintf(pool, "DBD: mod_dbd not compatible with APR in open");
+          break;
+      }
+  }
+  return NULL;
+}
+
+
+static const char *sqltemplate_db_param(cmd_parms *cmd, void *dconf, const char *val)
+{
+  const apr_dbd_driver_t *driver = NULL;
+  sqltpl_dbinfo_t *dbinfo = get_dbinfo(cmd->pool, cmd->server);
+
+  switch ((long) cmd->info) {
+    case 0:
+      dbinfo->driver_name = val;
+      switch (apr_dbd_get_driver(cmd->pool, dbinfo->driver_name, &dbinfo->driver)) {
+      case APR_ENOTIMPL:
+          return apr_psprintf(cmd->pool, "DBD: No driver for %s", dbinfo->driver_name);
+      case APR_EDSOOPEN:
+          return apr_psprintf(cmd->pool,
+#ifdef NETWARE
+                              "DBD: Can't load driver file dbd%s.nlm",
+#else
+                              "DBD: Can't load driver file apr_dbd_%s.so",
+#endif
+                              dbinfo->driver_name);
+      case APR_ESYMNOTFOUND:
+          return apr_psprintf(cmd->pool,
+                              "DBD: Failed to load driver apr_dbd_%s_driver",
+                              dbinfo->driver_name);
+      }
+      break;
+    case 1:
+      dbinfo->params = val;
+      break;
+  }
+
+  return NULL;
+}
+
 
 /*
  * Command table
  */
 static const command_rec sqltemplate_cmds[] =
 {
-  /* configuration file macro stuff
-  */
+  AP_INIT_TAKE1("SQLTemplateDBDriver", sqltemplate_db_param, (void*)0, EXEC_ON_READ | OR_ALL,
+      "DBD driver to use"),
+  AP_INIT_TAKE1("SQLTemplateDBParams", sqltemplate_db_param, (void*)1, EXEC_ON_READ | OR_ALL,
+      "DBD driver parameters"),
   AP_INIT_RAW_ARGS(BEGIN_SQLRPT, sqltemplate_rpt_section, NULL, EXEC_ON_READ | OR_ALL,
       "Beginning of a SQL repeating template section."),
 
-#if 0
-  /* configuration errors and warnings.
-  */
-  AP_INIT_RAW_ARGS(ERROR_KEYWORD, say_it, (void *)APLOG_ERR, OR_ALL,
-      "Error in a configuration file."),
-  AP_INIT_RAW_ARGS(WARNING_KEYWORD, say_it, (void *)APLOG_WARNING, OR_ALL,
-      "Warning in a configuration file."),
-#endif
-
   { NULL }
 };
-
-/*
-  if (mod_sqltemplate_prepare_fn == NULL) {
-  mod_sqltemplate_prepare_fn = APR_RETRIEVE_OPTIONAL_FN(ap_dbd_prepare);
-  if (mod_sqltemplate_prepare_fn == NULL) {
-  return "You must load mod_dbd to enable AuthDBD functions";
-  }
-  mod_sqltemplate_acquire_fn = APR_RETRIEVE_OPTIONAL_FN(ap_dbd_acquire);
-  }
-  label = apr_psprintf(cmd->pool, "mod_sqltemplate_%d", ++label_num);
- */
 
 /* Dispatch list for API hooks */
 module AP_MODULE_DECLARE_DATA sqltemplate_module = {
