@@ -360,6 +360,8 @@ static char * substitute(char * buf, int bufsize,
                   "substitute(%s,%s,%s,sh=%d,lbuf=%d,lrepl=%d,lsubs=%d)\n",
                   buf,name,replacement, shift, lbuf, lrepl, lsubs));
 
+    // TODO: escape double quotes
+
     if (size >= bufsize) {
         /* could/should I reallocate? */
         return "cannot substitute, buffer size too small";
@@ -634,57 +636,63 @@ static const char *sqltemplate_rpt_section(cmd_parms * cmd,
   debug(fprintf(stderr, "Preparing sub-pool...\n  %s\n", query));
   // set up a sub-pool
   apr_pool_t *prepared_pool;
-  rv = apr_pool_create(&prepared_pool, cmd->temp_pool);
+  rv = apr_pool_create(&prepared_pool, cmd->pool);
   if (rv != APR_SUCCESS) {
     ap_log_error(APLOG_MARK, APLOG_CRIT, rv, cmd->server, "SQLTemplate: Failed to create memory pool");
     return "Memory error";
   }
 
+
+  apr_array_header_t *query_fields, *replacements, *newcontents;
+  query_fields = apr_array_make(prepared_pool, 1, sizeof(char*));
+  replacements = apr_array_make(prepared_pool, 1, sizeof(char*));
+
+  apr_dbd_results_t *res = NULL;
+  apr_dbd_row_t *row = NULL;
+
+
 #if 0
-  fprintf(stderr, "DBINFO: %p %p\n", dbinfo->driver, dbinfo->handle);
+  fprintf(stderr, "pre-prepare DBINFO: %p %p %p\n", dbinfo->driver, dbinfo->handle, prepared_pool);
   fprintf(stderr, "Preparing query...\n  %s\n", query);
   rv = apr_dbd_prepare(dbinfo->driver, prepared_pool, dbinfo->handle, query, NULL, &stmt);
+  fprintf(stderr, "Prepared.\n  %s\n", query);
   if (rv) {
-    /*
     fprintf(stderr, "DBINFO: %p %p %d\n", dbinfo->driver, dbinfo->handle, rv);
     const char *dberrmsg = apr_dbd_error(dbinfo->driver, dbinfo->handle, rv);
     ap_log_error(APLOG_MARK, APLOG_ERR, rv, cmd->server,
                  "DBD: failed to prepare SQL statements: %s",
                  (dberrmsg ? dberrmsg : "[???]"));
-                 */
-    apr_pool_destroy(prepared_pool);
     return "Failed to prepare SQL statement";
   }
-#endif
-
-
-  apr_array_header_t *query_fields, *replacements, *newcontents;
-  query_fields = apr_array_make(cmd->temp_pool, 1, sizeof(char*));
-  replacements = apr_array_make(cmd->temp_pool, 1, sizeof(char*));
-
-  apr_dbd_results_t *res = NULL;
-  apr_dbd_row_t *row = NULL;
-
+  fprintf(stderr, "post-prepare DBINFO: %p %p\n", dbinfo->driver, dbinfo->handle);
+  if (apr_dbd_pselect(dbinfo->driver, prepared_pool, dbinfo->handle, &res, stmt, 0, query_arguments->nelts, (const char**)query_arguments->elts) != 0) {
+    ap_log_error(APLOG_MARK, APLOG_ERR, 0, cmd->server, "Failed to execute query: %s", query);
+    apr_pool_destroy(prepared_pool);
+    return "Failed to execute query";
+  }
+  fprintf(stderr, "post-select DBINFO: %p %p\n", dbinfo->driver, dbinfo->handle);
+#else
   if (apr_dbd_select(dbinfo->driver, prepared_pool, dbinfo->handle, &res, query, 0) != 0) {
     ap_log_error(APLOG_MARK, APLOG_ERR, 0, cmd->server, "Failed to execute query: %s", query);
     apr_pool_destroy(prepared_pool);
     return "Failed to execute query";
   }
+#endif
 
   i = 0;
   const char *name;
   for (name = apr_dbd_get_name(dbinfo->driver, res, i);
        name != NULL;
        name = apr_dbd_get_name(dbinfo->driver, res, ++i)) {
-    new = apr_array_push(query_fields); *new = apr_psprintf(cmd->temp_pool, "${%s}", name);
+    new = apr_array_push(query_fields); *new = apr_psprintf(prepared_pool, "${%s}", name);
   }
   new = apr_array_push(query_fields); *new = "\\$";
   debug(display_array(query_fields));
 
   // while (replacements = fetch_next_row) {
-  for (rv = apr_dbd_get_row(dbinfo->driver, cmd->temp_pool, res, &row, -1);
+  for (rv = apr_dbd_get_row(dbinfo->driver, prepared_pool, res, &row, -1);
        rv != -1;
-       rv = apr_dbd_get_row(dbinfo->driver, cmd->temp_pool, res, &row, -1)) {
+       rv = apr_dbd_get_row(dbinfo->driver, prepared_pool, res, &row, -1)) {
 
     if (rv != 0) {
       ap_log_error(APLOG_MARK, APLOG_ERR, rv, cmd->server, "Error retrieving results from database");
@@ -705,7 +713,7 @@ static const char *sqltemplate_rpt_section(cmd_parms * cmd,
     }
 
     // add special replacement: \$ --> $
-    new = apr_array_push(replacements); *new = apr_psprintf(cmd->temp_pool, "$");
+    new = apr_array_push(replacements); *new = apr_psprintf(prepared_pool, "$");
     debug(display_array(replacements));
 
     debug(fprintf(stderr, "Before "));
@@ -713,11 +721,11 @@ static const char *sqltemplate_rpt_section(cmd_parms * cmd,
 
     debug(fprintf(stderr, "processing...\n"));
 
-    errmsg = process_content(cmd->temp_pool, contents, query_fields, replacements,
+    errmsg = process_content(prepared_pool, contents, query_fields, replacements,
                              NULL, &newcontents);
 
     if (errmsg) {
-      return apr_psprintf(cmd->temp_pool,
+      return apr_psprintf(prepared_pool,
                          "%s error while substituting:\n%s",
                          where, errmsg);
     }
@@ -729,7 +737,7 @@ static const char *sqltemplate_rpt_section(cmd_parms * cmd,
     display_contents(newcontents);
 
     cmd->config_file = make_array_config
-        (cmd->temp_pool, newcontents, where, cmd->config_file, &cmd->config_file);
+        (prepared_pool, newcontents, where, cmd->config_file, &cmd->config_file);
   }
 
   return NULL;
