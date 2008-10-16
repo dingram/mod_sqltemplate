@@ -97,6 +97,9 @@ typedef struct {
 #define BEGIN_SQLIF "<SQLIf"
 #define END_SQLIF   "</SQLIf>"
 
+#define BEGIN_SQLSIMPLEIF "<SQLSimpleIf"
+#define END_SQLSIMPLEIF   "</SQLSimpleIf>"
+
 
 #define empty_string_p(p) (!(p) || !*(p))
 #define trim(line) while (*(line)==' ' || *(line)=='\t') (line)++
@@ -356,9 +359,11 @@ static char * substitute(char * buf, int bufsize,
     /* ??? */
     if (!strcmp(name,replacement)) return NULL;
 
+    /*
     debug(fprintf(stderr,
                   "substitute(%s,%s,%s,sh=%d,lbuf=%d,lrepl=%d,lsubs=%d)\n",
                   buf,name,replacement, shift, lbuf, lrepl, lsubs));
+                  */
 
     // TODO: escape double quotes
 
@@ -548,6 +553,78 @@ static const char *sqltemplate_db_connect(apr_pool_t *pool, server_rec *s) {
 
 
 
+/* handles: <SQLSimpleIf "SQL statement">
+*/
+static const char *sqltemplate_simpleif_section(cmd_parms * cmd,
+    void * dummy,
+    const char * arg)
+{
+  char *endp = ap_strrchr_c(arg, '>');
+  char *test_value;
+  if (endp == NULL) {
+    return apr_pstrcat(cmd->pool, cmd->cmd->name,
+        "> directive missing closing '>'", NULL);
+  }
+
+  if (endp) {
+    *endp = '\0';
+  }
+
+  /* get argument. */
+  test_value = ap_getword_conf(cmd->temp_pool, &arg);
+
+  trim(arg);
+  if (*arg) {
+    return "<SQLSimpleIf> only takes at most one argument";
+  }
+
+  if (empty_string_p(test_value)) {
+    /* treat empty argument as "false" */
+    return NULL;
+  }
+
+  const char *errmsg = NULL;
+  apr_array_header_t * contents=NULL;
+
+  const char *location = apr_psprintf(cmd->temp_pool,
+      "line %d of %s",
+      cmd->config_file->line_number,
+      cmd->config_file->name);
+
+  const char *where = apr_psprintf(cmd->temp_pool, "SQLSimpleIf at %s", location);
+
+  errmsg = get_lines_till_end_token(cmd->temp_pool, cmd->config_file,
+      END_SQLSIMPLEIF, BEGIN_SQLSIMPLEIF,
+      where, &contents);
+
+  if (errmsg) {
+    return apr_psprintf(cmd->temp_pool,
+        "%s\n\tcontents error: %s", where, errmsg);
+  }
+
+  debug(display_contents(contents));
+
+  int negate = 0;
+
+  if (*test_value=='!') {
+    test_value++;
+    negate = !0;
+  }
+
+  int do_include = (atoi(test_value)                      != 0 ||
+                    apr_strnatcasecmp(test_value, "yes" ) == 0 ||
+                    apr_strnatcasecmp(test_value, "on"  ) == 0 ||
+                    apr_strnatcasecmp(test_value, "true") == 0
+                   );
+
+  if (do_include != negate) {
+    cmd->config_file = make_array_config(cmd->temp_pool, contents, where, cmd->config_file, &cmd->config_file);
+  }
+
+  return NULL;
+}
+
+
 
 /* handles: <SQLRepeat "SQL statement">
 */
@@ -561,7 +638,7 @@ static const char *sqltemplate_rpt_section(cmd_parms * cmd,
 
   //macro_init(cmd->temp_pool); /* lazy... */
 
-  endp = ap_strchr_c(arg, '>');
+  endp = ap_strrchr_c(arg, '>');
   if (endp == NULL) {
     return apr_pstrcat(cmd->pool, cmd->cmd->name,
         "> directive missing closing '>'", NULL);
@@ -605,7 +682,7 @@ static const char *sqltemplate_rpt_section(cmd_parms * cmd,
     debug(fprintf(stderr, "sql_repeat query arg: %s\n", ((char **)query_arguments->elts)[i]));
   }
 
-  apr_array_header_t * contents;
+  apr_array_header_t * contents=NULL;
 
   errmsg = get_lines_till_end_token(cmd->temp_pool, cmd->config_file,
       END_SQLRPT, BEGIN_SQLRPT,
@@ -689,6 +766,8 @@ static const char *sqltemplate_rpt_section(cmd_parms * cmd,
   new = apr_array_push(query_fields); *new = "\\$";
   debug(display_array(query_fields));
 
+  apr_array_header_t *finalcontents = apr_array_make(cmd->temp_pool, 1, sizeof(char*));
+
   // while (replacements = fetch_next_row) {
   for (rv = apr_dbd_get_row(dbinfo->driver, prepared_pool, res, &row, -1);
        rv != -1;
@@ -730,14 +809,23 @@ static const char *sqltemplate_rpt_section(cmd_parms * cmd,
                          where, errmsg);
     }
 
+    debug(fprintf(stderr, "After "));
+    debug(display_contents(newcontents));
+
+    // append to final contents
+    apr_array_cat(finalcontents, newcontents);
+
+  }
+
+  if (finalcontents->nelts) {
+    debug(fprintf(stderr, "Final "));
+    display_contents(finalcontents);
+
     /* fix??? why is it wrong? should I -- the new one? */
     cmd->config_file->line_number++;
 
-    debug(fprintf(stderr, "After "));
-    display_contents(newcontents);
-
     cmd->config_file = make_array_config
-        (prepared_pool, newcontents, where, cmd->config_file, &cmd->config_file);
+        (prepared_pool, finalcontents, where, cmd->config_file, &cmd->config_file);
   }
 
   return NULL;
@@ -746,7 +834,6 @@ static const char *sqltemplate_rpt_section(cmd_parms * cmd,
 
 static const char *sqltemplate_db_param(cmd_parms *cmd, void *dconf, const char *val)
 {
-  const apr_dbd_driver_t *driver = NULL;
   sqltpl_dbinfo_t *dbinfo = get_dbinfo(cmd->temp_pool, cmd->server);
 
   switch ((long) cmd->info) {
@@ -789,6 +876,8 @@ static const command_rec sqltemplate_cmds[] =
       "DBD driver parameters"),
   AP_INIT_RAW_ARGS(BEGIN_SQLRPT, sqltemplate_rpt_section, NULL, EXEC_ON_READ | OR_ALL,
       "Beginning of a SQL repeating template section."),
+  AP_INIT_RAW_ARGS(BEGIN_SQLSIMPLEIF, sqltemplate_simpleif_section, NULL, EXEC_ON_READ | OR_ALL,
+      "Beginning of a simple conditional-include section."),
 
   { NULL }
 };
