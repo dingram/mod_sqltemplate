@@ -339,30 +339,22 @@ static ap_configfile_t * make_array_config(apr_pool_t * p,
    returns an error message or NULL.
 */
 static char * substitute(char * buf, int bufsize,
-                         const char * name,
+                         const int targetlen,
                          const char * replacement)
 {
     int
       lbuf  = buf         ? strlen(buf        ) : 0,
-      lname = name        ? strlen(name       ) : 0,
       lrepl = replacement ? strlen(replacement) : 0,
-      lsubs = lrepl,
-      shift = lsubs - lname,
+      shift = lrepl - targetlen,
       size  = lbuf + shift,
       i, j;
 
-    if (!lbuf || !lname || !lrepl) return NULL;
-
-    /* buf must starts with name */
-    ap_assert(!strncmp(buf, name, lname));
-
-    /* ??? */
-    if (!strcmp(name,replacement)) return NULL;
+    if (!lbuf || !targetlen || !lrepl) return NULL;
 
     /*
     debug(fprintf(stderr,
-                  "substitute(%s,%s,%s,sh=%d,lbuf=%d,lrepl=%d,lsubs=%d)\n",
-                  buf,name,replacement, shift, lbuf, lrepl, lsubs));
+                  "substitute(%s,%s,%s,sh=%d,lbuf=%d,lrepl=%d,lrepl=%d)\n",
+                  buf,name,replacement, shift, lbuf, lrepl, lrepl));
                   */
 
     // TODO: escape double quotes
@@ -374,10 +366,10 @@ static char * substitute(char * buf, int bufsize,
 
     /* shift the end of line */
     if (shift < 0) {
-        for (i = lname; i <= lbuf; i++)
+        for (i = targetlen; i <= lbuf; i++)
             buf[i + shift] = buf[i];
     } else if (shift > 0) {
-        for (i = lbuf; i >= lname; i--)
+        for (i = lbuf; i >= targetlen; i--)
             buf[i + shift] = buf[i];
     }
 
@@ -390,6 +382,120 @@ static char * substitute(char * buf, int bufsize,
 
     return NULL;
 }
+
+
+/**
+ * Find next place for substitution.
+ */
+/*
+ * Algorithm:
+ *   do {
+ *     target = strstr(buf, "$");
+ *   } while (target>buf && *(target-1)=='\\');
+ *   if (*(target+1) == '{') {
+ *     endbrace = strstr(target+1, '}');
+ *     if (!endbrace) {
+ *       syntax error;
+ *       return NULL;
+ *     }
+ *     find which tab element this is strcmp()==0 to
+ *     if (not in tab) {
+ *       warn "Unrecognised variable"
+ *       continue;
+ *     }
+ *     found match, return starting position = target, length = len(match)+3
+ *   } elseif (!*(target+1)) {
+ *     continue;
+ *   } else  {
+ *     loop through tab {
+ *       if (ap_strstr(target+1, tab[i]) != target+1) {
+ *         continue;
+ *       }
+ *       if (longer than current match) {
+ *         save as current match;
+ *       }
+ *     }
+ *   }
+ */
+static char * find_next_substitution(const char * buf,
+                                     const apr_array_header_t * args,
+                                     int * replacement_len,
+                                     int * whichone)
+{
+  char *target=NULL;
+  char *found=NULL;
+  char *chosen=NULL;
+  char **tab = (char**)args->elts;
+
+  do {
+    target = ap_strstr(found?found:buf, "$");
+
+    if (!target || !*target || !*(target+1)) {
+      // no '$', or it's at the end
+      return NULL;
+    }
+
+    // skip '$'
+    found=target+1;
+
+    if (target > buf && *(target-1)=='\\') {
+      // convert "\$" to "$"
+      *whichone=-1;
+      *replacement_len=2;
+      return (target-1);
+
+    } else if (*found == '{') {         // something of the form ${foo}
+      // skip '{'
+      found++;
+
+      // find matching '}'
+      char *endbrace = ap_strstr(found, "}");
+      if (!endbrace) {
+        // syntax error
+        fprintf(stderr, "Syntax error: no closing brace\n");
+        return NULL;
+      }
+
+      int i=0;
+      // find out which variable it is
+      for (i=0; i<args->nelts; i++) {
+        if ((strlen(tab[i]) == endbrace - found) && strncmp(found, tab[i], endbrace - found)==0) {
+          chosen=found;
+          *whichone = i;
+          *replacement_len = strlen(tab[i]) + 3; /* 3 = strlen("${}") */
+          // there will only ever be one
+          break;
+        }
+      }
+    } else {                     // something of the form $foo
+      // find the longest match
+      int i=0;
+      size_t lchosen = 0;
+      for (i = 0; i < args->nelts; i++) {
+        if (ap_strstr(found, tab[i]) == found) {
+          size_t lfound = strlen(tab[i]);
+          if (lchosen < lfound) {
+            chosen = found;
+            lchosen = lfound;
+            *whichone = i;
+            *replacement_len = lfound + 1; /* 1 = strlen("$"); */
+          }
+        }
+      }
+    }
+
+    if (chosen) {
+      return target;
+    } else {
+      // warning: unrecognised variable
+      fprintf(stderr, "Unrecognised variable name\n");
+      // try again
+    }
+  } while (target && *target);
+  return NULL;
+}
+
+
 
 /* find first occurence of args in buf.
    in case of conflict, the LONGEST argument is kept. (could be the FIRST?).
@@ -437,26 +543,42 @@ static char * substitute_macro_args(char * buf, int bufsize,
     }
     debug(fprintf(stderr, "1# %s", buf));
 
-    while ((ptr = next_substitution(ptr, arguments, &whichone))) {
-      debug(fprintf(stderr, "errmsg = substitute("));
-      debug(fprintf(stderr, "ptr:\"%s\", ", ptr));
-      debug(fprintf(stderr, "buf:%p - ptr:%p + bufsize:%d = %d, ", buf, ptr, bufsize, buf - ptr + bufsize));
-      debug(fprintf(stderr, "atab[whichone:%d]:\"%s\", ", whichone, atab[whichone]));
-      debug(fprintf(stderr, "rtab[whichone:%d]:\"%s\"", whichone, rtab[whichone]));
-      debug(fprintf(stderr, ");\n"));
+    int len=0;
+    while ((ptr = find_next_substitution(ptr, arguments, &len, &whichone))) {
+      if (whichone<0) {
+        // replace "\$" with "$"
+        debug(fprintf(stderr, "substitute("));
+        debug(fprintf(stderr, "ptr:\"%s\", ", ptr));
+        debug(fprintf(stderr, "buf:%p - ptr:%p + bufsize:%d = %d, ", buf, ptr, bufsize, buf - ptr + bufsize));
+        debug(fprintf(stderr, "targetlen:%d, ", len));
+        debug(fprintf(stderr, "\"$\""));
+        debug(fprintf(stderr, ");\n"));
 
-        errmsg = substitute(ptr, buf - ptr + bufsize,
-                            atab[whichone], rtab[whichone]);
+        errmsg = substitute(ptr, buf - ptr + bufsize, len, "$");
         if (errmsg) {
-            return errmsg;
+          return errmsg;
+        }
+        ptr+=2;
+      } else {
+        debug(fprintf(stderr, "substitute("));
+        debug(fprintf(stderr, "ptr:\"%s\", ", ptr));
+        debug(fprintf(stderr, "buf:%p - ptr:%p + bufsize:%d = %d, ", buf, ptr, bufsize, buf - ptr + bufsize));
+        debug(fprintf(stderr, "targetlen:%d, ", len));
+        debug(fprintf(stderr, "rtab[whichone:%d]:\"%s\"", whichone, rtab[whichone]));
+        debug(fprintf(stderr, ");\n"));
+
+        errmsg = substitute(ptr, buf - ptr + bufsize, len, rtab[whichone]);
+        if (errmsg) {
+          return errmsg;
         }
         ptr += strlen(rtab[whichone]);
         if (!*rtab[whichone]) {
           ptr++;
         }
         if (used) {
-            used->elts[whichone] = 1;
+          used->elts[whichone] = 1;
         }
+      }
     }
     debug(fprintf(stderr, "2# %s", buf));
 
@@ -538,10 +660,10 @@ static const char *sqltemplate_db_connect(apr_pool_t *pool, server_rec *s) {
     switch (rv) {
       case APR_EGENERAL:
           ap_log_error(APLOG_MARK, APLOG_ERR, 0, s, "mod_sqltemplate: Can't connect to %s: %s", dbinfo->driver_name, err);
-          return apr_psprintf(pool, "DBD: Can't connect to %s", dbinfo->driver_name);
+          return apr_psprintf(pool, "mod_sqltemplate: Can't connect to %s", dbinfo->driver_name);
           break;
       default:
-          return apr_psprintf(pool, "DBD: mod_dbd not compatible with APR in open");
+          return apr_psprintf(pool, "mod_sqltemplate: mod_sqltemplate not compatible with APR in open");
           break;
     }
   }
@@ -625,6 +747,101 @@ static const char *sqltemplate_simpleif_section(cmd_parms * cmd,
 }
 
 
+/**
+ * Check the section command ends with a ">", and consign everything after that
+ * to oblivion.
+ */
+static const char *sqltpl_sec_open_check(cmd_parms *cmd, const char *arg)
+{
+  char *endp = ap_strrchr_c(arg, '>');
+
+  if (endp == NULL) {
+    return apr_pstrcat(cmd->pool, cmd->cmd->name,
+        "> directive missing closing '>'", NULL);
+  }
+
+  /*   endp =~ s/>[^>]*$//   */
+  if (endp) {
+    *endp = '\0';
+  }
+
+  return NULL;
+}
+
+
+#define could_error(x) do {\
+  const char * errmsg = (x);\
+  if (errmsg) return errmsg;\
+} while (0)
+
+#define could_error_msg(p,m,x) do {\
+  const char * errmsg = (x);\
+  if (errmsg) return apr_psprintf(p, "%s%s", m, errmsg);\
+} while (0)
+
+
+/**
+ * Perform an SQL query, and return column names if requested.
+ *
+ * @param query The SQL to execute
+ * @param args  An APR array of arguments for the query
+ * @param pool  An APR memory pool that we can use
+ * @param dbinfo Information about the database connection
+ * @param res    Address of a pointer to fill with query result; pointer may be NULL on entry.
+ * @param col_names If not NULL, this array will be filled with the query's column names
+ *
+ * @return An error message, or NULL if no error.
+ */
+static const char *sqltpl_dbquery(char               *query,
+                                  apr_array_header_t *args,
+                                  apr_pool_t         *pool,
+                                  server_rec         *server,
+                                  sqltpl_dbinfo_t    *dbinfo,
+                                  apr_dbd_results_t **res,
+                                  apr_array_header_t *col_names
+                                 ) {
+
+#if 0
+  fprintf(stderr, "pre-prepare DBINFO: %p %p %p\n", dbinfo->driver, dbinfo->handle, prepared_pool);
+  fprintf(stderr, "Preparing query...\n  %s\n", query);
+  rv = apr_dbd_prepare(dbinfo->driver, prepared_pool, dbinfo->handle, query, NULL, &stmt);
+  fprintf(stderr, "Prepared.\n  %s\n", query);
+  if (rv) {
+    fprintf(stderr, "DBINFO: %p %p %d\n", dbinfo->driver, dbinfo->handle, rv);
+    const char *dberrmsg = apr_dbd_error(dbinfo->driver, dbinfo->handle, rv);
+    ap_log_error(APLOG_MARK, APLOG_ERR, rv, server,
+                 "DBD: failed to prepare SQL statements: %s",
+                 (dberrmsg ? dberrmsg : "[???]"));
+    return "Failed to prepare SQL statement";
+  }
+  fprintf(stderr, "post-prepare DBINFO: %p %p\n", dbinfo->driver, dbinfo->handle);
+  if (apr_dbd_pselect(dbinfo->driver, prepared_pool, dbinfo->handle, &res, stmt, 0, query_arguments->nelts, (const char**)query_arguments->elts) != 0) {
+    ap_log_error(APLOG_MARK, APLOG_ERR, 0, server, "Failed to execute query: %s", query);
+    apr_pool_destroy(prepared_pool);
+    return "Failed to execute query";
+  }
+  fprintf(stderr, "post-select DBINFO: %p %p\n", dbinfo->driver, dbinfo->handle);
+#else
+  if (apr_dbd_select(dbinfo->driver, pool, dbinfo->handle, res, query, 0) != 0) {
+    ap_log_error(APLOG_MARK, APLOG_ERR, 0, server, "Failed to execute query: %s", query);
+    return "Failed to execute query";
+  }
+#endif
+
+  if (col_names) {
+    int i=0;
+    const char *name;
+    for (name = apr_dbd_get_name(dbinfo->driver, *res, i);
+         name != NULL;
+         name = apr_dbd_get_name(dbinfo->driver, *res, ++i)) {
+      char **new = apr_array_push(col_names); *new = apr_psprintf(pool, "%s", name);
+    }
+    debug(display_array(col_names));
+  }
+
+  return NULL;
+}
+
 
 /* handles: <SQLRepeat "SQL statement">
 */
@@ -632,23 +849,10 @@ static const char *sqltemplate_rpt_section(cmd_parms * cmd,
     void * dummy,
     const char * arg)
 {
-  const char * errmsg, * where, * location;
-  char ** new, * query, * endp;
-  //macro_t * macro, * old;
+  const char * where, * location;
+  char * query;
 
-  //macro_init(cmd->temp_pool); /* lazy... */
-
-  endp = ap_strrchr_c(arg, '>');
-  if (endp == NULL) {
-    return apr_pstrcat(cmd->pool, cmd->cmd->name,
-        "> directive missing closing '>'", NULL);
-  }
-
-  /* hmmm... drops out '>[^>]*$'
-  */
-  if (endp) {
-    *endp = '\0';
-  }
+  could_error(sqltpl_sec_open_check(cmd, arg));
 
   /* get name. */
   query = ap_getword_conf(cmd->temp_pool, &arg);
@@ -657,53 +861,24 @@ static const char *sqltemplate_rpt_section(cmd_parms * cmd,
     return "SQL repeat definition: query not specified";
   }
 
-#if 0
-  macro = (macro_t *)apr_palloc(cmd->temp_pool, sizeof(macro_t));
-#endif
-  debug(fprintf(stderr, "sql_repeat query: %s\n", query));
+  debug(fprintf(stderr, "SQLRepeat query: %s\n", query));
 
   /* get query arguments. */
-  location = apr_psprintf(cmd->temp_pool,
-      "line %d of %s",
-      cmd->config_file->line_number,
-      cmd->config_file->name);
-  //fprintf(stderr, "sql_repeat location: %s\n", location);
-
-  //where = apr_psprintf(cmd->temp_pool, "SQLRepeat \"%s\" (%s)", name, location);
-  where = apr_psprintf(cmd->temp_pool, "SQLRepeat at %s", location);
+  location = apr_psprintf(cmd->temp_pool, "%s:%d", cmd->config_file->name, cmd->config_file->line_number);
+  where    = apr_psprintf(cmd->temp_pool, "SQLRepeat at %s:%d", cmd->config_file->name, cmd->config_file->line_number);
 
   apr_array_header_t * query_arguments = get_arguments(cmd->temp_pool, arg);
-
-  errmsg=NULL;
-
-  int i=0;
-
-  for (i=0; i < query_arguments->nelts; i++) {
-    debug(fprintf(stderr, "sql_repeat query arg: %s\n", ((char **)query_arguments->elts)[i]));
-  }
-
   apr_array_header_t * contents=NULL;
 
-  errmsg = get_lines_till_end_token(cmd->temp_pool, cmd->config_file,
-      END_SQLRPT, BEGIN_SQLRPT,
-      where, &contents);
-
-  if (errmsg) {
-    return apr_psprintf(cmd->temp_pool,
-        "%s\n\tcontents error: %s", where, errmsg);
-  }
+  could_error(get_lines_till_end_token(cmd->temp_pool, cmd->config_file, END_SQLRPT, BEGIN_SQLRPT, where, &contents));
 
   debug(display_contents(contents));
 
 
   // acquire DB connection
-  errmsg = sqltemplate_db_connect(cmd->temp_pool, cmd->server);
+  could_error_msg(cmd->temp_pool, "Database error: ", sqltemplate_db_connect(cmd->pool, cmd->server));
 
-  if (errmsg) {
-    return apr_psprintf(cmd->temp_pool, "%s: Database error: %s", where, errmsg);
-  }
-
-  sqltpl_dbinfo_t *dbinfo = get_dbinfo(cmd->temp_pool, cmd->server);
+  sqltpl_dbinfo_t *dbinfo = get_dbinfo(cmd->pool, cmd->server);
   debug(fprintf(stderr, "DBINFO: %p %p\n", dbinfo->driver, dbinfo->handle));
   apr_status_t rv;
   apr_dbd_prepared_t *stmt;
@@ -727,44 +902,15 @@ static const char *sqltemplate_rpt_section(cmd_parms * cmd,
   apr_dbd_results_t *res = NULL;
   apr_dbd_row_t *row = NULL;
 
+  do {
+    const char *errmsg = sqltpl_dbquery(query, query_arguments, prepared_pool, cmd->server, dbinfo, &res, query_fields);
+    if (errmsg) {
+      apr_pool_destroy(prepared_pool);
+      return errmsg;
+    }
+  } while (0);
 
-#if 0
-  fprintf(stderr, "pre-prepare DBINFO: %p %p %p\n", dbinfo->driver, dbinfo->handle, prepared_pool);
-  fprintf(stderr, "Preparing query...\n  %s\n", query);
-  rv = apr_dbd_prepare(dbinfo->driver, prepared_pool, dbinfo->handle, query, NULL, &stmt);
-  fprintf(stderr, "Prepared.\n  %s\n", query);
-  if (rv) {
-    fprintf(stderr, "DBINFO: %p %p %d\n", dbinfo->driver, dbinfo->handle, rv);
-    const char *dberrmsg = apr_dbd_error(dbinfo->driver, dbinfo->handle, rv);
-    ap_log_error(APLOG_MARK, APLOG_ERR, rv, cmd->server,
-                 "DBD: failed to prepare SQL statements: %s",
-                 (dberrmsg ? dberrmsg : "[???]"));
-    return "Failed to prepare SQL statement";
-  }
-  fprintf(stderr, "post-prepare DBINFO: %p %p\n", dbinfo->driver, dbinfo->handle);
-  if (apr_dbd_pselect(dbinfo->driver, prepared_pool, dbinfo->handle, &res, stmt, 0, query_arguments->nelts, (const char**)query_arguments->elts) != 0) {
-    ap_log_error(APLOG_MARK, APLOG_ERR, 0, cmd->server, "Failed to execute query: %s", query);
-    apr_pool_destroy(prepared_pool);
-    return "Failed to execute query";
-  }
-  fprintf(stderr, "post-select DBINFO: %p %p\n", dbinfo->driver, dbinfo->handle);
-#else
-  if (apr_dbd_select(dbinfo->driver, prepared_pool, dbinfo->handle, &res, query, 0) != 0) {
-    ap_log_error(APLOG_MARK, APLOG_ERR, 0, cmd->server, "Failed to execute query: %s", query);
-    apr_pool_destroy(prepared_pool);
-    return "Failed to execute query";
-  }
-#endif
-
-  i = 0;
-  const char *name;
-  for (name = apr_dbd_get_name(dbinfo->driver, res, i);
-       name != NULL;
-       name = apr_dbd_get_name(dbinfo->driver, res, ++i)) {
-    new = apr_array_push(query_fields); *new = apr_psprintf(prepared_pool, "${%s}", name);
-  }
-  new = apr_array_push(query_fields); *new = "\\$";
-  debug(display_array(query_fields));
+  char **new = apr_array_push(query_fields); *new = "\\$";
 
   apr_array_header_t *finalcontents = apr_array_make(cmd->temp_pool, 1, sizeof(char*));
 
@@ -784,6 +930,7 @@ static const char *sqltemplate_rpt_section(cmd_parms * cmd,
 
     debug(fprintf(stderr, "Fetching entries\n"));
     const char *ent;
+    int i;
     for (i=0; i < query_fields->nelts - 1; i++) {
       ent = apr_dbd_get_entry(dbinfo->driver, row, i);
       if (ent) {
@@ -800,14 +947,7 @@ static const char *sqltemplate_rpt_section(cmd_parms * cmd,
 
     debug(fprintf(stderr, "processing...\n"));
 
-    errmsg = process_content(prepared_pool, contents, query_fields, replacements,
-                             NULL, &newcontents);
-
-    if (errmsg) {
-      return apr_psprintf(prepared_pool,
-                         "%s error while substituting:\n%s",
-                         where, errmsg);
-    }
+    could_error_msg(cmd->temp_pool, "Error while substituting: ", process_content(prepared_pool, contents, query_fields, replacements, NULL, &newcontents));
 
     debug(fprintf(stderr, "After "));
     debug(display_contents(newcontents));
@@ -819,7 +959,7 @@ static const char *sqltemplate_rpt_section(cmd_parms * cmd,
 
   if (finalcontents->nelts) {
     debug(fprintf(stderr, "Final "));
-    display_contents(finalcontents);
+    debug(display_contents(finalcontents));
 
     /* fix??? why is it wrong? should I -- the new one? */
     cmd->config_file->line_number++;
@@ -834,25 +974,25 @@ static const char *sqltemplate_rpt_section(cmd_parms * cmd,
 
 static const char *sqltemplate_db_param(cmd_parms *cmd, void *dconf, const char *val)
 {
-  sqltpl_dbinfo_t *dbinfo = get_dbinfo(cmd->temp_pool, cmd->server);
+  sqltpl_dbinfo_t *dbinfo = get_dbinfo(cmd->pool, cmd->server);
 
   switch ((long) cmd->info) {
     case 0:
       dbinfo->driver_name = val;
       switch (apr_dbd_get_driver(cmd->temp_pool, dbinfo->driver_name, &dbinfo->driver)) {
       case APR_ENOTIMPL:
-          return apr_psprintf(cmd->temp_pool, "DBD: No driver for %s", dbinfo->driver_name);
+          return apr_psprintf(cmd->temp_pool, "mod_sqltemplate: No driver for %s", dbinfo->driver_name);
       case APR_EDSOOPEN:
           return apr_psprintf(cmd->temp_pool,
 #ifdef NETWARE
-                              "DBD: Can't load driver file dbd%s.nlm",
+                              "mod_sqltemplate: Can't load driver file dbd%s.nlm",
 #else
-                              "DBD: Can't load driver file apr_dbd_%s.so",
+                              "mod_sqltemplate: Can't load driver file apr_dbd_%s.so",
 #endif
                               dbinfo->driver_name);
       case APR_ESYMNOTFOUND:
           return apr_psprintf(cmd->temp_pool,
-                              "DBD: Failed to load driver apr_dbd_%s_driver",
+                              "mod_sqltemplate: Failed to load driver apr_dbd_%s_driver",
                               dbinfo->driver_name);
       }
       break;
