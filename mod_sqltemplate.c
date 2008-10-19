@@ -58,7 +58,7 @@
  *
  *   This product was inspired by software developed by Fabien Coelho
  *   <mod.macro@coelho.net> for use in the mod_macro project
- *   (http://www.coelho.net/mod_macro/).
+ *   (http://www.coelho.net/mod_macro/), and uses some code from it.
  *
  * ====================================================================
  */
@@ -158,7 +158,7 @@ static char * get_lines_till_end_token(apr_pool_t * p,
   apr_array_header_t * lines = apr_array_make(p, 1, sizeof(char *));
   char ** new, * first, * ptr;
   char line[MAX_STRING_LEN]; /* sorry, but that is expected by getline. */
-  int macro_nesting = 1, any_nesting = 1, line_number = 0;
+  int section_nesting = 1, any_nesting = 1, line_number = 0;
 
   while (!ap_cfg_getline(line, MAX_STRING_LEN, config_file)) {
     ptr = line;
@@ -170,36 +170,32 @@ static char * get_lines_till_end_token(apr_pool_t * p,
       /* nesting... */
       if (!strncmp(first, "</", 2)) {
         any_nesting--;
-#if !defined(MOD_MACRO_NO_WARNINGS)
         if (any_nesting<0) {
           ap_log_error(APLOG_MARK, APLOG_NOERRNO|APLOG_WARNING,
               0, NULL,
               "bad (negative) nesting on line %d of %s",
               line_number, where);
         }
-#endif
       }
       else if (!strncmp(first, "<", 1)) {
         any_nesting++;
       }
 
       if (!strcasecmp(first, end_token)) { /* okay! */
-        macro_nesting--;
-        if (!macro_nesting) {
-#if !defined(MOD_MACRO_NO_WARNINGS)
+        section_nesting--;
+        if (!section_nesting) {
           if (any_nesting) {
             ap_log_error(APLOG_MARK, APLOG_NOERRNO|APLOG_WARNING,
                 0, NULL,
                 "bad cumulated nesting (%+d) in %s",
                 any_nesting, where);
           }
-#endif
           *plines = lines;
           return NULL;
         }
       }
       else if (begin_token && !strcasecmp(first, begin_token)) {
-        macro_nesting++;
+        section_nesting++;
       }
     }
     /* free first. */
@@ -425,7 +421,9 @@ static char * substitute(char * buf, int bufsize,
 static char * find_next_substitution(const char * buf,
                                      const apr_array_header_t * args,
                                      int * replacement_len,
-                                     int * whichone)
+                                     int * whichone,
+                                     int lineno,
+                                     const char *where)
 {
   char *target=NULL;
   char *found=NULL;
@@ -457,7 +455,7 @@ static char * find_next_substitution(const char * buf,
       char *endbrace = ap_strstr(found, "}");
       if (!endbrace) {
         // syntax error
-        fprintf(stderr, "Syntax error: no closing brace\n");
+        ap_log_error(APLOG_MARK, APLOG_NOERRNO|APLOG_WARNING, 0, NULL, "Syntax error: no closing brace on line %d of %s", lineno, where);
         return NULL;
       }
 
@@ -493,7 +491,28 @@ static char * find_next_substitution(const char * buf,
       return target;
     } else {
       // warning: unrecognised variable
-      fprintf(stderr, "Unrecognised variable name\n");
+      char *varend=target+1;
+      int inbrace=0;
+      do {
+        if (!inbrace && varend==target+1 && *varend=='{') {
+          inbrace=1;
+        }
+        varend++;
+      } while (*varend &&
+               ((inbrace && *(varend-1) != '}') ||
+                (!inbrace && ( (*varend >= 'a' && *varend <= 'z') ||
+                               (*varend >= 'A' && *varend <= 'Z') ||
+                               (*varend >= '0' && *varend <= '9') ||
+                                *varend == '_'
+                             )
+                )
+               )
+              );
+      char varname[varend-target+1];
+      memset(varname, 0, varend-target+1);
+      strncpy(varname, target, varend-target);
+      ap_log_error(APLOG_MARK, APLOG_NOERRNO|APLOG_WARNING, 0, NULL,
+          "Unrecognised variable %s on line %d of %s", varname, lineno, where);
       // try again
     }
   } while (target && *target);
@@ -504,12 +523,14 @@ static char * find_next_substitution(const char * buf,
 
 /* substitute arguments by replacements in buf of bufsize.
    returns an error message or NULL.
-   if used is defined, returns the used macro arguments.
+   if used is defined, returns the used arguments.
 */
-static char * substitute_macro_args(char * buf, int bufsize,
+static char * substitute_section_args(char * buf, int bufsize,
                                     const apr_array_header_t * arguments,
                                     const apr_array_header_t * replacements,
-                                    apr_array_header_t * used)
+                                    apr_array_header_t * used,
+                                    int lineno,
+                                    const char *where)
 {
     char * ptr = buf, * errmsg,
         ** rtab = (char **)replacements->elts;
@@ -521,7 +542,7 @@ static char * substitute_macro_args(char * buf, int bufsize,
     debug(fprintf(stderr, "1# %s", buf));
 
     int len=0;
-    while ((ptr = find_next_substitution(ptr, arguments, &len, &whichone))) {
+    while ((ptr = find_next_substitution(ptr, arguments, &len, &whichone, lineno, where))) {
       if (whichone<0) {
         // replace "\$" with "$"
         debug(fprintf(stderr, "substitute("));
@@ -562,17 +583,18 @@ static char * substitute_macro_args(char * buf, int bufsize,
     return NULL;
 }
 
-/* perform substitutions in a macro contents and
+/* perform substitutions in section contents and
    return the result as a newly allocated array, if result is defined.
    may also return an error message.
-   passes used down to substitute_macro_args.
+   passes used down to substitute_section_args.
 */
 static const char * process_content(apr_pool_t * p,
                                     const apr_array_header_t * contents,
                                     const apr_array_header_t * arguments,
                                     const apr_array_header_t * replacements,
                                     apr_array_header_t * used,
-                                    apr_array_header_t ** result)
+                                    apr_array_header_t ** result,
+                                    const char *where)
 {
     char ** new, * errmsg, line[MAX_STRING_LEN];
     int i;
@@ -584,15 +606,9 @@ static const char * process_content(apr_pool_t * p,
     for (i = 0; i < contents->nelts; i++) {
       debug(fprintf(stderr, "Line %d of %d\n", i+1, contents->nelts));
       strncpy(line, ((char **)contents->elts)[i], MAX_STRING_LEN - 1);
-      errmsg = substitute_macro_args(line, MAX_STRING_LEN,
-                                       arguments, replacements, used);
+      errmsg = substitute_section_args(line, MAX_STRING_LEN, arguments, replacements, used, i+1, where);
       debug(fprintf(stderr, "Line %d of %d done\n", i+1, contents->nelts));
       if (errmsg) {
-#if 0
-        return apr_psprintf(p, "while processing line %d of macro '%s'"
-                           " (%s)%s",
-                            i + 1, macro->name, macro->location, errmsg);
-#endif
         return errmsg;
       }
 
@@ -922,7 +938,7 @@ static const char *sqltemplate_rpt_section(cmd_parms * cmd,
 
     debug(fprintf(stderr, "processing...\n"));
 
-    could_error_msg(cmd->temp_pool, "Error while substituting: ", process_content(prepared_pool, contents, query_fields, replacements, NULL, &newcontents));
+    could_error_msg(cmd->temp_pool, "Error while substituting: ", process_content(prepared_pool, contents, query_fields, replacements, NULL, &newcontents, where));
 
     debug(fprintf(stderr, "After "));
     debug(display_contents(newcontents));
@@ -1065,7 +1081,7 @@ static const char *sqltemplate_catset_section(cmd_parms * cmd,
 
   debug(fprintf(stderr, "Processing...\n"));
 
-  could_error_msg(cmd->temp_pool, "Error while substituting: ", process_content(prepared_pool, contents, query_fields, replacements, NULL, &newcontents));
+  could_error_msg(cmd->temp_pool, "Error while substituting: ", process_content(prepared_pool, contents, query_fields, replacements, NULL, &newcontents, where));
 
   if (rowcount) {
     debug(fprintf(stderr, "Final "));
