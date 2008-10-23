@@ -350,13 +350,11 @@ static char * substitute(char * buf, int bufsize,
       size  = lbuf + shift,
       i, j;
 
-    if (!lbuf || !targetlen || !lrepl) return NULL;
+    if (!lbuf || !targetlen || !replacement) return NULL;
 
-    /*
     debug(fprintf(stderr,
-                  "substitute(%s,%s,%s,sh=%d,lbuf=%d,lrepl=%d,lrepl=%d)\n",
-                  buf,name,replacement, shift, lbuf, lrepl, lrepl));
-                  */
+                  "substitute(%s,%d,%s,sh=%d,lbuf=%d,lrepl=%d)\n",
+                  buf,targetlen,replacement, shift, lbuf, lrepl));
 
     // TODO: escape double quotes
 
@@ -797,9 +795,9 @@ static const char *sqltpl_dbquery(char               *query,
 #if 0
   apr_dbd_prepared_t *stmt;
 
-  fprintf(stderr, "pre-prepare DBINFO: %p %p %p\n", dbinfo->driver, dbinfo->handle, prepared_pool);
+  fprintf(stderr, "pre-prepare DBINFO: %p %p %p\n", dbinfo->driver, dbinfo->handle, pool);
   fprintf(stderr, "Preparing query...\n  %s\n", query);
-  rv = apr_dbd_prepare(dbinfo->driver, prepared_pool, dbinfo->handle, query, NULL, &stmt);
+  apr_status_t rv = apr_dbd_prepare(dbinfo->driver, pool, dbinfo->handle, query, NULL, &stmt);
   fprintf(stderr, "Prepared.\n  %s\n", query);
   if (rv) {
     fprintf(stderr, "DBINFO: %p %p %d\n", dbinfo->driver, dbinfo->handle, rv);
@@ -810,9 +808,9 @@ static const char *sqltpl_dbquery(char               *query,
     return "Failed to prepare SQL statement";
   }
   fprintf(stderr, "post-prepare DBINFO: %p %p\n", dbinfo->driver, dbinfo->handle);
-  if (apr_dbd_pselect(dbinfo->driver, prepared_pool, dbinfo->handle, &res, stmt, 0, query_arguments->nelts, (const char**)query_arguments->elts) != 0) {
+  if (apr_dbd_pselect(dbinfo->driver, pool, dbinfo->handle, res, stmt, 0, args->nelts, (const char**)args->elts) != 0) {
     ap_log_error(APLOG_MARK, APLOG_ERR, 0, server, "Failed to execute query: %s", query);
-    apr_pool_destroy(prepared_pool);
+    apr_pool_destroy(pool);
     return "Failed to execute query";
   }
   fprintf(stderr, "post-select DBINFO: %p %p\n", dbinfo->driver, dbinfo->handle);
