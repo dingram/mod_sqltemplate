@@ -1104,20 +1104,20 @@ static const char *sqltemplate_db_param(cmd_parms *cmd, void *dconf, const char 
     case 0:
       dbinfo->driver_name = val;
       switch (apr_dbd_get_driver(cmd->temp_pool, dbinfo->driver_name, &dbinfo->driver)) {
-      case APR_ENOTIMPL:
-          return apr_psprintf(cmd->temp_pool, "mod_sqltemplate: No driver for %s", dbinfo->driver_name);
-      case APR_EDSOOPEN:
-          return apr_psprintf(cmd->temp_pool,
+        case APR_ENOTIMPL:
+            return apr_psprintf(cmd->temp_pool, "mod_sqltemplate: No driver for %s", dbinfo->driver_name);
+        case APR_EDSOOPEN:
+            return apr_psprintf(cmd->temp_pool,
 #ifdef NETWARE
-                              "mod_sqltemplate: Can't load driver file dbd%s.nlm",
+                                "mod_sqltemplate: Can't load driver dbd%s.nlm -- please ensure that support for %s has been compiled into apr-util.",
 #else
-                              "mod_sqltemplate: Can't load driver file apr_dbd_%s.so",
+                                "mod_sqltemplate: Can't load driver apr_dbd_%s.so -- please ensure that support for %s has been compiled into apr-util.",
 #endif
-                              dbinfo->driver_name);
-      case APR_ESYMNOTFOUND:
-          return apr_psprintf(cmd->temp_pool,
-                              "mod_sqltemplate: Failed to load driver apr_dbd_%s_driver",
-                              dbinfo->driver_name);
+                                dbinfo->driver_name, dbinfo->driver_name);
+        case APR_ESYMNOTFOUND:
+            return apr_psprintf(cmd->temp_pool,
+                                "mod_sqltemplate: Failed to load driver apr_dbd_%s_driver",
+                                dbinfo->driver_name);
       }
       break;
     case 1:
