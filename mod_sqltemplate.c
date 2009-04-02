@@ -74,9 +74,9 @@
 #include "apr_file_io.h"
 
 #ifdef _DEBUG_SQLTPL
-#  define debug(x) x
+#  define debug(l, x) do { if (l <= _DEBUG_SQLTPL) { x; } } while(0)
 #else
-#  define debug(x)
+#  define debug(l, x)
 #endif
 
 extern module AP_MODULE_DECLARE_DATA sqltemplate_module;
@@ -352,7 +352,7 @@ static char * substitute(char * buf, int bufsize,
 
     if (!lbuf || !targetlen || !replacement) return NULL;
 
-    debug(fprintf(stderr,
+    debug(4, fprintf(stderr,
                   "substitute(%s,%d,%s,sh=%d,lbuf=%d,lrepl=%d)\n",
                   buf,targetlen,replacement, shift, lbuf, lrepl));
 
@@ -537,18 +537,18 @@ static char * substitute_section_args(char * buf, int bufsize,
     if (used) {
         ap_assert(used->nalloc >= replacements->nelts);
     }
-    debug(fprintf(stderr, "1# %s", buf));
+    debug(4, fprintf(stderr, "1# %s", buf));
 
     int len=0;
     while ((ptr = find_next_substitution(ptr, arguments, &len, &whichone, lineno, where))) {
       if (whichone<0) {
         // replace "\$" with "$"
-        debug(fprintf(stderr, "substitute("));
-        debug(fprintf(stderr, "ptr:\"%s\", ", ptr));
-        debug(fprintf(stderr, "buf:%p - ptr:%p + bufsize:%d = %d, ", buf, ptr, bufsize, buf - ptr + bufsize));
-        debug(fprintf(stderr, "targetlen:%d, ", len));
-        debug(fprintf(stderr, "\"$\""));
-        debug(fprintf(stderr, ");\n"));
+        debug(4, fprintf(stderr, "substitute("));
+        debug(4, fprintf(stderr, "ptr:\"%s\", ", ptr));
+        debug(4, fprintf(stderr, "buf:%p - ptr:%p + bufsize:%d = %d, ", buf, ptr, bufsize, buf - ptr + bufsize));
+        debug(4, fprintf(stderr, "targetlen:%d, ", len));
+        debug(4, fprintf(stderr, "\"$\""));
+        debug(4, fprintf(stderr, ");\n"));
 
         errmsg = substitute(ptr, buf - ptr + bufsize, len, "$");
         if (errmsg) {
@@ -556,12 +556,12 @@ static char * substitute_section_args(char * buf, int bufsize,
         }
         ptr+=2;
       } else {
-        debug(fprintf(stderr, "substitute("));
-        debug(fprintf(stderr, "ptr:\"%s\", ", ptr));
-        debug(fprintf(stderr, "buf:%p - ptr:%p + bufsize:%d = %d, ", buf, ptr, bufsize, buf - ptr + bufsize));
-        debug(fprintf(stderr, "targetlen:%d, ", len));
-        debug(fprintf(stderr, "rtab[whichone:%d]:\"%s\"", whichone, rtab[whichone]));
-        debug(fprintf(stderr, ");\n"));
+        debug(4, fprintf(stderr, "substitute("));
+        debug(4, fprintf(stderr, "ptr:\"%s\", ", ptr));
+        debug(4, fprintf(stderr, "buf:%p - ptr:%p + bufsize:%d = %d, ", buf, ptr, bufsize, buf - ptr + bufsize));
+        debug(4, fprintf(stderr, "targetlen:%d, ", len));
+        debug(4, fprintf(stderr, "rtab[whichone:%d]:\"%s\"", whichone, rtab[whichone]));
+        debug(4, fprintf(stderr, ");\n"));
 
         errmsg = substitute(ptr, buf - ptr + bufsize, len, rtab[whichone]);
         if (errmsg) {
@@ -576,7 +576,7 @@ static char * substitute_section_args(char * buf, int bufsize,
         }
       }
     }
-    debug(fprintf(stderr, "2# %s", buf));
+    debug(4, fprintf(stderr, "2# %s", buf));
 
     return NULL;
 }
@@ -602,10 +602,10 @@ static const char * process_content(apr_pool_t * p,
     }
 
     for (i = 0; i < contents->nelts; i++) {
-      debug(fprintf(stderr, "Line %d of %d\n", i+1, contents->nelts));
+      debug(4, fprintf(stderr, "Line %d of %d\n", i+1, contents->nelts));
       strncpy(line, ((char **)contents->elts)[i], MAX_STRING_LEN - 1);
       errmsg = substitute_section_args(line, MAX_STRING_LEN, arguments, replacements, used, i+1, where);
-      debug(fprintf(stderr, "Line %d of %d done\n", i+1, contents->nelts));
+      debug(4, fprintf(stderr, "Line %d of %d done\n", i+1, contents->nelts));
       if (errmsg) {
         return errmsg;
       }
@@ -636,17 +636,17 @@ static const char *sqltemplate_db_connect(apr_pool_t *pool, server_rec *s) {
     return "Database connection not set up - please use SQLTemplateDBDriver and SQLTemplateDBParams";
   }
 
-  debug(fprintf(stderr, "Driver: %p\n", dbinfo->driver));
-  debug(fprintf(stderr, "Handle: %p\n", dbinfo->handle));
+  debug(2, fprintf(stderr, "Driver: %p\n", dbinfo->driver));
+  debug(2, fprintf(stderr, "Handle: %p\n", dbinfo->handle));
 
   if (dbinfo->handle) {
     return NULL;
   }
 
   const char *err;
-  debug(fprintf(stderr, "Attempting connect with:\n  driver %s\n  params %s\n", dbinfo->driver_name, dbinfo->params));
+  debug(3, fprintf(stderr, "Attempting connect with:\n  driver %s\n  params %s\n", dbinfo->driver_name, dbinfo->params));
   apr_status_t rv = apr_dbd_open_ex(dbinfo->driver, pool, dbinfo->params, &dbinfo->handle, &err);
-  debug(fprintf(stderr, "Done\n"));
+  debug(2, fprintf(stderr, "Connected\n"));
   if (rv != APR_SUCCESS) {
     switch (rv) {
       case APR_EGENERAL:
@@ -666,7 +666,7 @@ static const char *sqltemplate_db_connect(apr_pool_t *pool, server_rec *s) {
 
 
 
-/* handles: <SQLSimpleIf "SQL statement">
+/* handles: <SQLSimpleIf "truth value">
 */
 static const char *sqltemplate_simpleif_section(cmd_parms * cmd,
     void * dummy,
@@ -715,7 +715,7 @@ static const char *sqltemplate_simpleif_section(cmd_parms * cmd,
     return NULL;
   }
 
-  debug(display_contents(contents));
+  debug(1, fprintf(stderr, "SQLSimpleIf at %s:\n", location));
 
   int negate = 0;
 
@@ -731,7 +731,10 @@ static const char *sqltemplate_simpleif_section(cmd_parms * cmd,
                    );
 
   if (do_include != negate) {
+    debug(1, display_contents(contents));
     cmd->config_file = make_array_config(cmd->temp_pool, contents, where, cmd->config_file, &cmd->config_file);
+  } else {
+    debug(1, fprintf(stderr, "[ignored]\n"));
   }
 
   return NULL;
@@ -829,7 +832,7 @@ static const char *sqltpl_dbquery(char               *query,
          name = apr_dbd_get_name(dbinfo->driver, *res, ++i)) {
       char **new = apr_array_push(col_names); *new = apr_psprintf(pool, "%s", name);
     }
-    debug(display_array(col_names));
+    debug(2, display_array(col_names));
   }
 
   return NULL;
@@ -854,30 +857,31 @@ static const char *sqltemplate_rpt_section(cmd_parms * cmd,
     return "SQL repeat definition: query not specified";
   }
 
-  debug(fprintf(stderr, "SQLRepeat query: %s\n", query));
-
   /* get query arguments. */
   location = apr_psprintf(cmd->temp_pool, "%s:%d", cmd->config_file->name, cmd->config_file->line_number);
   where    = apr_psprintf(cmd->temp_pool, "SQLRepeat at %s:%d", cmd->config_file->name, cmd->config_file->line_number);
+
+  debug(1, fprintf(stderr, "%s:\n", where));
+  debug(2, fprintf(stderr, "Query: %s\n", query));
 
   apr_array_header_t * query_arguments = get_arguments(cmd->temp_pool, arg);
   apr_array_header_t * contents=NULL;
 
   could_error(get_lines_till_end_token(cmd->temp_pool, cmd->config_file, END_SQLRPT, BEGIN_SQLRPT, where, &contents));
 
-  debug(display_contents(contents));
+  debug(2, display_contents(contents));
 
 
   // acquire DB connection
   could_error_msg(cmd->temp_pool, "Database error: ", sqltemplate_db_connect(cmd->pool, cmd->server));
 
   sqltpl_dbinfo_t *dbinfo = get_dbinfo(cmd->pool, cmd->server);
-  debug(fprintf(stderr, "DBINFO: %p %p\n", dbinfo->driver, dbinfo->handle));
+  debug(3, fprintf(stderr, "DBINFO: %p %p\n", dbinfo->driver, dbinfo->handle));
   apr_status_t rv;
 
   // prepare the query
 
-  debug(fprintf(stderr, "Preparing sub-pool...\n  %s\n", query));
+  debug(3, fprintf(stderr, "Preparing sub-pool...\n  %s\n", query));
   // set up a sub-pool
   apr_pool_t *prepared_pool;
   rv = apr_pool_create(&prepared_pool, cmd->pool);
@@ -914,10 +918,10 @@ static const char *sqltemplate_rpt_section(cmd_parms * cmd,
       return "Error retrieving results";
     }
 
-    debug(fprintf(stderr, "Clearing replacements\n"));
+    debug(3, fprintf(stderr, "Clearing replacements\n"));
     apr_array_clear(replacements);
 
-    debug(fprintf(stderr, "Fetching entries\n"));
+    debug(2, fprintf(stderr, "Fetching entries\n"));
     const char *ent;
     int i;
     for (i=0; i < query_fields->nelts; i++) {
@@ -929,17 +933,17 @@ static const char *sqltemplate_rpt_section(cmd_parms * cmd,
       }
     }
 
-    debug(display_array(replacements));
+    debug(2, display_array(replacements));
 
-    debug(fprintf(stderr, "Before "));
-    debug(display_contents(contents));
+    debug(3, fprintf(stderr, "Before "));
+    debug(3, display_contents(contents));
 
-    debug(fprintf(stderr, "processing...\n"));
+    debug(4, fprintf(stderr, "processing...\n"));
 
     could_error_msg(cmd->temp_pool, "Error while substituting: ", process_content(prepared_pool, contents, query_fields, replacements, NULL, &newcontents, where));
 
-    debug(fprintf(stderr, "After "));
-    debug(display_contents(newcontents));
+    debug(3, fprintf(stderr, "After "));
+    debug(3, display_contents(newcontents));
 
     // append to final contents
     apr_array_cat(finalcontents, newcontents);
@@ -947,14 +951,16 @@ static const char *sqltemplate_rpt_section(cmd_parms * cmd,
   }
 
   if (finalcontents->nelts) {
-    debug(fprintf(stderr, "Final "));
-    debug(display_contents(finalcontents));
+    debug(1, fprintf(stderr, "Final "));
+    debug(1, display_contents(finalcontents));
 
     /* fix??? why is it wrong? should I -- the new one? */
     cmd->config_file->line_number++;
 
     cmd->config_file = make_array_config
         (prepared_pool, finalcontents, where, cmd->config_file, &cmd->config_file);
+  } else {
+    debug(1, fprintf(stderr, "[no query results]\n"));
   }
 
   return NULL;
@@ -975,7 +981,6 @@ static const char *sqltemplate_catset_section(cmd_parms * cmd,
   /* get seperator. */
   sep = ap_getword_conf(cmd->temp_pool, &arg);
 
-  debug(fprintf(stderr, "SQLCatSet seperator: \"%s\"\n", sep));
 
   /* get query. */
   query = ap_getword_conf(cmd->temp_pool, &arg);
@@ -984,30 +989,33 @@ static const char *sqltemplate_catset_section(cmd_parms * cmd,
     return "SQLCatSet definition: query not specified";
   }
 
-  debug(fprintf(stderr, "SQLCatSet query: %s\n", query));
 
   /* get query arguments. */
   location = apr_psprintf(cmd->temp_pool, "%s:%d", cmd->config_file->name, cmd->config_file->line_number);
   where    = apr_psprintf(cmd->temp_pool, "SQLCatSet at %s:%d", cmd->config_file->name, cmd->config_file->line_number);
+
+  debug(1, fprintf(stderr, "%s:\n", where));
+  debug(2, fprintf(stderr, "SQLCatSet seperator: \"%s\"\n", sep));
+  debug(2, fprintf(stderr, "SQLCatSet query: %s\n", query));
 
   apr_array_header_t * query_arguments = get_arguments(cmd->temp_pool, arg);
   apr_array_header_t * contents=NULL;
 
   could_error(get_lines_till_end_token(cmd->temp_pool, cmd->config_file, END_SQLCATSET, BEGIN_SQLCATSET, where, &contents));
 
-  debug(display_contents(contents));
+  debug(2, display_contents(contents));
 
 
   // acquire DB connection
   could_error_msg(cmd->temp_pool, "Database error: ", sqltemplate_db_connect(cmd->pool, cmd->server));
 
   sqltpl_dbinfo_t *dbinfo = get_dbinfo(cmd->pool, cmd->server);
-  debug(fprintf(stderr, "DBINFO: %p %p\n", dbinfo->driver, dbinfo->handle));
+  debug(3, fprintf(stderr, "DBINFO: %p %p\n", dbinfo->driver, dbinfo->handle));
   apr_status_t rv;
 
   // prepare the query
 
-  debug(fprintf(stderr, "Preparing sub-pool...\n  %s\n", query));
+  debug(3, fprintf(stderr, "Preparing sub-pool...\n  %s\n", query));
   // set up a sub-pool
   apr_pool_t *prepared_pool;
   rv = apr_pool_create(&prepared_pool, cmd->pool);
@@ -1050,10 +1058,10 @@ static const char *sqltemplate_catset_section(cmd_parms * cmd,
       return "Error retrieving results";
     }
 
-    debug(fprintf(stderr, "Clearing replacements\n"));
+    debug(3, fprintf(stderr, "Clearing replacements\n"));
     apr_array_clear(replacements);
 
-    debug(fprintf(stderr, "Fetching entries\n"));
+    debug(2, fprintf(stderr, "Fetching entries\n"));
     const char *ent;
     char **rtab=(char**)replacements->elts;
     for (i=0; i < query_fields->nelts; i++) {
@@ -1062,34 +1070,36 @@ static const char *sqltemplate_catset_section(cmd_parms * cmd,
         ent = "";
       }
       if (*rtab[i]) {
-        debug(fprintf(stderr, "Appending \"%s%s\" to set\n", sep, ent));
+        debug(3, fprintf(stderr, "Appending \"%s%s\" to set\n", sep, ent));
         rtab[i] = apr_pstrcat(cmd->temp_pool, rtab[i], sep, ent, NULL);
       } else {
-        debug(fprintf(stderr, "Appending \"%s\" to set\n", ent));
+        debug(3, fprintf(stderr, "Appending \"%s\" to set\n", ent));
         rtab[i] = apr_pstrcat(cmd->temp_pool, rtab[i], ent, NULL);
       }
     }
 
-    debug(display_array(replacements));
+    debug(3, display_array(replacements));
     rowcount++;
   }
 
-  debug(fprintf(stderr, "Before "));
-  debug(display_contents(contents));
+  debug(2, fprintf(stderr, "Before "));
+  debug(2, display_contents(contents));
 
-  debug(fprintf(stderr, "Processing...\n"));
+  debug(3, fprintf(stderr, "Processing...\n"));
 
   could_error_msg(cmd->temp_pool, "Error while substituting: ", process_content(prepared_pool, contents, query_fields, replacements, NULL, &newcontents, where));
 
   if (rowcount) {
-    debug(fprintf(stderr, "Final "));
-    debug(display_contents(newcontents));
+    debug(1, fprintf(stderr, "Final "));
+    debug(1, display_contents(newcontents));
 
     /* fix??? why is it wrong? should I -- the new one? */
     cmd->config_file->line_number++;
 
     cmd->config_file = make_array_config
         (prepared_pool, newcontents, where, cmd->config_file, &cmd->config_file);
+  } else {
+    debug(1, fprintf(stderr, "[no query results]\n"));
   }
 
   return NULL;
