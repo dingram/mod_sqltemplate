@@ -691,11 +691,6 @@ static const char *sqltemplate_simpleif_section(cmd_parms * cmd,
     return "<SQLSimpleIf> only takes at most one argument";
   }
 
-  if (empty_string_p(test_value)) {
-    /* treat empty argument as "false" */
-    return NULL;
-  }
-
   const char *errmsg = NULL;
   apr_array_header_t * contents=NULL;
 
@@ -713,6 +708,11 @@ static const char *sqltemplate_simpleif_section(cmd_parms * cmd,
   if (errmsg) {
     return apr_psprintf(cmd->temp_pool,
         "%s\n\tcontents error: %s", where, errmsg);
+  }
+
+  if (empty_string_p(test_value)) {
+    /* treat empty argument as "false" */
+    return NULL;
   }
 
   debug(display_contents(contents));
@@ -925,7 +925,7 @@ static const char *sqltemplate_rpt_section(cmd_parms * cmd,
       if (ent) {
         char **new = apr_array_push(replacements); *new = (char *)ent;
       } else {
-        char **new = apr_array_push(replacements); *new = "";
+        char **new = apr_array_push(replacements); *new = apr_pstrdup(cmd->temp_pool, "");
       }
     }
 
