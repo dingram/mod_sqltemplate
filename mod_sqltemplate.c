@@ -72,6 +72,11 @@
 #include "apr_dbd.h"
 #include "apr_portable.h"
 #include "apr_file_io.h"
+#include "apu_version.h"
+
+#if (APU_MAJOR_VERSION < 1) || (APU_MAJOR_VERSION == 1 && APU_MINOR_VERSION < 3)
+#  error "This module requires apr-util 1.3 or newer"
+#endif
 
 #ifdef _DEBUG_SQLTPL
 #  define debug(l, x) do { if (l <= _DEBUG_SQLTPL) { x; } } while(0)
