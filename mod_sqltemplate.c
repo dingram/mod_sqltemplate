@@ -70,13 +70,24 @@
 #include "apr.h"
 #include "apr_strings.h"
 #include "apr_dbd.h"
-#include "apr_optional.h"
 #include "apr_portable.h"
 #include "apr_file_io.h"
+#include "apu.h"
 #include "apu_version.h"
 
 #if (APU_MAJOR_VERSION < 1) || (APU_MAJOR_VERSION == 1 && APU_MINOR_VERSION < 3)
-#  error "This module requires apr-util 1.3 or newer"
+#if (APU_HAVE_PGSQL)
+#include <libpq-fe.h>
+#endif
+#if (APU_HAVE_MYSQL)
+#include <mysql.h>
+#endif
+#if (APU_HAVE_SQLITE2)
+#include <sqlite.h>
+#endif
+#if (APU_HAVE_SQLITE3)
+#include <sqlite3.h>
+#endif
 #endif
 
 #ifdef _DEBUG_SQLTPL
@@ -114,6 +125,105 @@ typedef struct {
 #define empty_string_p(p) (!(p) || !*(p))
 #define trim(line) while (*(line)==' ' || *(line)=='\t') (line)++
 
+
+/* the fake apr_dbd_get_name function, courtesy of Bojan Smojver and mod_spin */
+#if (APU_MAJOR_VERSION < 1) || (APU_MAJOR_VERSION == 1 && APU_MINOR_VERSION < 3)
+static const char *get_name(const apr_dbd_driver_t *driver,apr_pool_t *pool,
+                            apr_dbd_results_t *res,int col){
+#if (APU_HAVE_PGSQL)
+  struct apr_dbd_pgsql_results_t{
+    int random;
+    PGconn *handle;
+    PGresult *res;
+    size_t ntuples;
+    size_t sz;
+    size_t index;
+  } *pgres;
+#endif
+#if (APU_HAVE_MYSQL)
+  struct apr_dbd_mysql_results_t{
+    int random;
+    MYSQL_RES *res;
+    MYSQL_STMT *statement;
+    MYSQL_BIND *bind;
+  } *myres;
+#endif
+#if (APU_HAVE_SQLITE2)
+  struct apr_dbd_sqlite2_results_t{
+    int random;
+    sqlite *handle;
+    char **res;
+    size_t ntuples;
+    size_t sz;
+    size_t index;
+  } *s2res;
+#endif
+#if (APU_HAVE_SQLITE3)
+  typedef struct{
+    char *name;
+    char *value;
+    int size;
+    int type;
+  } apr_dbd_sqlite3_column_t;
+
+  typedef struct{
+    apr_dbd_results_t *res;
+    apr_dbd_sqlite3_column_t **columns;
+    apr_dbd_row_t *next_row;
+    int columnCount;
+    int rownum;
+  } apr_dbd_sqlite3_row_t;
+
+  struct apr_dbd_sqlite3_results_t{
+    int random;
+    sqlite3 *handle;
+    sqlite3_stmt *stmt;
+    apr_dbd_sqlite3_row_t *next_row;
+    size_t sz;
+    int tuples;
+    char **col_names;
+  } *s3res;
+#endif
+  const char *dname=apr_dbd_name(driver);
+
+  if(!strcmp(dname,"pgsql")){
+#if (APU_HAVE_PGSQL)
+    pgres=(struct apr_dbd_pgsql_results_t *)res;
+
+    return (pgres->res?PQfname(pgres->res,col):NULL);
+#endif
+  } else if(!strcmp(dname,"mysql")){
+#if (APU_HAVE_MYSQL)
+    myres=(struct apr_dbd_mysql_results_t *)res;
+
+    if((col<0) || (col>=mysql_num_fields(myres->res)))
+      return NULL;
+
+    return mysql_fetch_fields(myres->res)[col].name;
+#endif
+  } else if(!strcmp(dname,"sqlite2")){
+#if (APU_HAVE_SQLITE2)
+    s2res=(struct apr_dbd_sqlite2_results_t *)res;
+
+    if((col<0) || (col>=s2res->sz))
+      return NULL;
+
+    return s2res->res[col];
+#endif
+  } else if(!strcmp(dname,"sqlite3")){
+#if (APU_HAVE_SQLITE3)
+    s3res=(struct apr_dbd_sqlite3_results_t *)res;
+
+    if((col<0) || (col>=s3res->sz))
+      return NULL;
+
+    return s3res->next_row->columns[col]->name;
+#endif
+  }
+
+  return apr_psprintf(pool,"column%d",col);
+}
+#endif
 
 static void *get_dbinfo(apr_pool_t *pool, server_rec *s) {
   sqltpl_dbinfo_t *dbinfo = ap_get_module_config(s->module_config, &sqltemplate_module);
@@ -638,10 +748,6 @@ static apr_status_t sqltpl_db_close(void *data) {
 
 static const char *sqltemplate_db_connect(apr_pool_t *pool, server_rec *s) {
 
-  if (APR_RETRIEVE_OPTIONAL_FN(ap_dbd_open)==NULL) {
-    return "mod_sqltemplate requires DBD support to be built into Apache";
-  }
-
   sqltpl_dbinfo_t *dbinfo = get_dbinfo(pool, s);
   if (!dbinfo->driver || !dbinfo->params || !*(dbinfo->params) || !dbinfo->driver_name || !*(dbinfo->driver_name)) {
     return "Database connection not set up - please use SQLTemplateDBDriver and SQLTemplateDBParams";
@@ -838,11 +944,19 @@ static const char *sqltpl_dbquery(char               *query,
   if (col_names) {
     int i=0;
     const char *name;
+#if (APU_MAJOR_VERSION > 1) || (APU_MAJOR_VERSION == 1 && APU_MINOR_VERSION >= 3)
     for (name = apr_dbd_get_name(dbinfo->driver, *res, i);
          name != NULL;
          name = apr_dbd_get_name(dbinfo->driver, *res, ++i)) {
       char **new = apr_array_push(col_names); *new = apr_psprintf(pool, "%s", name);
     }
+#else
+    for (name = get_name(dbinfo->driver, pool, *res, i);
+         name != NULL;
+         name = get_name(dbinfo->driver, pool, *res, ++i)) {
+      char **new = apr_array_push(col_names); *new = apr_psprintf(pool, "%s", name);
+    }
+#endif
     debug(2, display_array(col_names));
   }
 
