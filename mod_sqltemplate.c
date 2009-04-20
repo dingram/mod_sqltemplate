@@ -762,7 +762,11 @@ static const char *sqltemplate_db_connect(apr_pool_t *pool, server_rec *s) {
 
   const char *err;
   debug(3, fprintf(stderr, "Attempting connect with:\n  driver %s\n  params %s\n", dbinfo->driver_name, dbinfo->params));
+#if (APU_MAJOR_VERSION < 1) || (APU_MAJOR_VERSION == 1 && APU_MINOR_VERSION < 3)
+  apr_status_t rv = apr_dbd_open(dbinfo->driver, pool, dbinfo->params, &dbinfo->handle);
+#else
   apr_status_t rv = apr_dbd_open_ex(dbinfo->driver, pool, dbinfo->params, &dbinfo->handle, &err);
+#endif
   debug(2, fprintf(stderr, "Connected\n"));
   if (rv != APR_SUCCESS) {
     switch (rv) {
@@ -1044,7 +1048,11 @@ static const char *sqltemplate_rpt_section(cmd_parms * cmd,
     }
 
     debug(3, fprintf(stderr, "Clearing replacements\n"));
+#if (APU_MAJOR_VERSION < 1) || (APU_MAJOR_VERSION == 1 && APU_MINOR_VERSION < 3)
+    replacements->nelts = 0;
+#else
     apr_array_clear(replacements);
+#endif
 
     debug(2, fprintf(stderr, "Fetching entries\n"));
     const char *ent;
@@ -1184,7 +1192,11 @@ static const char *sqltemplate_catset_section(cmd_parms * cmd,
     }
 
     debug(3, fprintf(stderr, "Clearing replacements\n"));
+#if (APU_MAJOR_VERSION < 1) || (APU_MAJOR_VERSION == 1 && APU_MINOR_VERSION < 3)
+    replacements->nelts = 0;
+#else
     apr_array_clear(replacements);
+#endif
 
     debug(2, fprintf(stderr, "Fetching entries\n"));
     const char *ent;
