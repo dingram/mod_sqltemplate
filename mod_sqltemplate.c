@@ -70,6 +70,7 @@
 #include "apr.h"
 #include "apr_strings.h"
 #include "apr_dbd.h"
+#include "apr_optional.h"
 #include "apr_portable.h"
 #include "apr_file_io.h"
 #include "apu_version.h"
@@ -636,6 +637,11 @@ static apr_status_t sqltpl_db_close(void *data) {
 }
 
 static const char *sqltemplate_db_connect(apr_pool_t *pool, server_rec *s) {
+
+  if (APR_RETRIEVE_OPTIONAL_FN(ap_dbd_open)==NULL) {
+    return "mod_sqltemplate requires DBD support to be built into Apache";
+  }
+
   sqltpl_dbinfo_t *dbinfo = get_dbinfo(pool, s);
   if (!dbinfo->driver || !dbinfo->params || !*(dbinfo->params) || !dbinfo->driver_name || !*(dbinfo->driver_name)) {
     return "Database connection not set up - please use SQLTemplateDBDriver and SQLTemplateDBParams";
