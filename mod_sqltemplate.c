@@ -1252,7 +1252,7 @@ static const char *sqltemplate_db_param(cmd_parms *cmd, void *dconf, const char 
       dbinfo->driver_name = val;
       switch (apr_dbd_get_driver(cmd->temp_pool, dbinfo->driver_name, &dbinfo->driver)) {
         case APR_ENOTIMPL:
-            return apr_psprintf(cmd->temp_pool, "mod_sqltemplate: No driver for %s", dbinfo->driver_name);
+            return apr_psprintf(cmd->temp_pool, "mod_sqltemplate: Driver loading is not supported by APR");
         case APR_EDSOOPEN:
             return apr_psprintf(cmd->temp_pool,
 #ifdef NETWARE
