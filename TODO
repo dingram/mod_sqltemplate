@@ -1,0 +1,4 @@
+2009-12-06:
+
+ - Automatically query the database to see if it has changed, and cause an
+   Apache configuration reload if necessary.

@@ -1,0 +1,25 @@
+For installation instructions, see INSTALL.
+
+This module allows you to store values for a templated configuration
+information in an SQL database.
+
+For more information, see:
+  http://www.dmi.me.uk/code/apache/mod_sqltemplate/
+
+
+Details
+-------
+
+This module has many uses, but it is probably most useful when combined with
+virtual hosting (although it can be used with almost any configuration
+directives or database layouts).
+
+It provides a method for repeating sections with values plugged in from the
+results of an SQL query, letting you easily configure an Apache server with
+relatively little work.
+
+
+Example
+-------
+
+Coming soon.
