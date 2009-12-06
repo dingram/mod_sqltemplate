@@ -1,15 +1,15 @@
-AC_INIT(ssi_include_memcached, 1.0)
+AC_INIT(sqltemplate, 1.0)
 MAKE_CONFIG_NICE(config.nice)
 AC_PREREQ(2.53)
 
-AC_CONFIG_SRCDIR([src/ssi_include_memcached.c])
+AC_CONFIG_SRCDIR([src/sqltemplate.c])
 AC_CONFIG_AUX_DIR(config)
 AC_PROG_LIBTOOL
 AM_MAINTAINER_MODE
 AC_CANONICAL_TARGET
 AM_INIT_AUTOMAKE(AC_PACKAGE_NAME, AC_PACKAGE_VERSION)
 
-AM_CONFIG_HEADER([src/ssi_include_memcached_config.h:config.in])
+AM_CONFIG_HEADER([src/sqltemplate_config.h:config.in])
 
 AC_PROG_CC
 AC_PROG_CXX
