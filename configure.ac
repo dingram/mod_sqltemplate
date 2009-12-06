@@ -22,18 +22,20 @@ CHECK_APACHE(,$AP_VERSION,
     AC_MSG_ERROR([*** Apache version $AP_VERSION not found!])
 )
 
+AX_LIB_MYSQL("4.1")
+
 prefix=${AP_PREFIX}
 
 LIBTOOL="`${APR_CONFIG} --apr-libtool`"
 AC_SUBST(LIBTOOL)
 
-MODULE_CFLAGS="${APXS_CFLAGS} ${AP_INCLUDES} ${APR_INCLUDES} ${APU_INCLUDES}"
+MODULE_CFLAGS="${APXS_CFLAGS} ${AP_INCLUDES} ${APR_INCLUDES} ${APU_INCLUDES} ${MYSQL_CFLAGS}"
 AC_SUBST(MODULE_CFLAGS)
 
-MODULE_LDFLAGS=" `${APR_CONFIG} --link-libtool` `${APU_CONFIG} --link-libtool`"
+MODULE_LDFLAGS=" `${APR_CONFIG} --link-libtool` `${APU_CONFIG} --link-libtool` ${MYSQL_LDFLAGS}"
 AC_SUBST(MODULE_LDFLAGS)
 
-BIN_LDFLAGS=" `${APR_CONFIG} --link-libtool` `${APU_CONFIG} --link-libtool` `${APU_CONFIG} --ldflags --libs` `${APR_CONFIG} --ldflags --libs`"
+BIN_LDFLAGS=" `${APR_CONFIG} --link-libtool` `${APU_CONFIG} --link-libtool` `${APU_CONFIG} --ldflags --libs` `${APR_CONFIG} --ldflags --libs` ${MYSQL_LDFLAGS}"
 AC_SUBST(BIN_LDFLAGS)
 
 dnl this should be a list to all of the makefiles you expect to be generated
