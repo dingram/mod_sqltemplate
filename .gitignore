@@ -1,1 +1,16 @@
 .*.sw?
+autom4te.cache/*
+src/.deps/*
+src/.libs/*
+config.*
+config/*
+Makefile
+Makefile.in
+aclocal.m4
+configure
+libtool
+src/*.la
+src/*_config.h
+src/*.lo
+src/*.o
+src/stamp-h1
